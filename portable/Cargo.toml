@@ -1,0 +1,80 @@
+[package]
+name = "portable"
+version = "0.1.0"
+edition = "2024"
+
+[package.metadata.docs.rs]
+rustdoc-args = ["--cfg", "docsrs"]
+all-features = true
+
+[dependencies]
+arrayvec-0_7 = { version = "0.7", package = "arrayvec", default-features = false, optional = true }
+bytes-1 = { version = "1", package = "bytes", default-features = false, optional = true }
+const-random = { version = "0.1", optional = true }
+getrandom = { version = "0.4", optional = true }
+rapidhash = { version = "4", optional = true, default-features = false }
+serde = { version = "1", default-features = false, optional = true }
+rend-0_5 = { version = "0.5", package = "rend", optional = true }
+rkyv-0_8 = { version = "0.8", package = "rkyv", optional = true, default-features = false }
+smallvec-1 = { version = "1", package = "smallvec", default-features = false, optional = true }
+smol_str-0_2 = { version = "0.2", package = "smol_str", default-features = false, optional = true }
+smol_str-0_3 = { version = "0.3", package = "smol_str", default-features = false, optional = true }
+thin-vec-0_2 = { version = "0.2", package = "thin-vec", default-features = false, optional = true }
+tinyvec-1 = { version = "1", package = "tinyvec", default-features = false, optional = true }
+triomphe-0_1 = { version = "0.1", package = "triomphe", default-features = false, optional = true }
+bstr-1 = { version = "1", package = "bstr", default-features = false, optional = true }
+ascii-1 = { version = "1", package = "ascii", default-features = false, optional = true }
+allocator-api2-0_4 = { version = "0.4", package = "allocator-api2", default-features = false, features = ["alloc"], optional = true }
+allocator-api2-0_3 = { version = "0.3", package = "allocator-api2", default-features = false, features = ["alloc"], optional = true }
+allocator-api2-0_2 = { version = "0.2", package = "allocator-api2", default-features = false, features = ["alloc"], optional = true }
+bumpalo-3 = { version = "3", package = "bumpalo", default-features = false, optional = true, features = ["boxed", "collections"] }
+either-1 = { version = "1", package = "either", default-features = false, optional = true }
+
+[features]
+default = ["std", "default-hasher", "getrandom"]
+std = ["alloc"]
+alloc = ["rkyv-0_8?/alloc", "tinyvec-1?/alloc", "bstr-1?/alloc", "ascii-1?/alloc"]
+default-hasher = ["dep:const-random", "dep:rapidhash"]
+getrandom = ["dep:getrandom"]
+serde = ["dep:serde"]
+
+rkyv-0_8 = ["dep:rkyv-0_8", "rend-0_5"]
+rend-0_5 = ["dep:rend-0_5"]
+allocator-api2-0_4 = ["dep:allocator-api2-0_4"]
+allocator-api2-0_3 = ["dep:allocator-api2-0_3"]
+allocator-api2-0_2 = ["dep:allocator-api2-0_2"]
+arrayvec-0_7 = ["dep:arrayvec-0_7"]
+ascii-1 = ["dep:ascii-1"]
+bstr-1 = ["dep:bstr-1"]
+bumpalo-3 = ["dep:bumpalo-3"]
+bytes-1 = ["dep:bytes-1"]
+either-1 = ["dep:either-1"]
+smallvec-1 = ["dep:smallvec-1"]
+smol_str-0_2 = ["dep:smol_str-0_2"]
+smol_str-0_3 = ["dep:smol_str-0_3"]
+thin-vec-0_2 = ["dep:thin-vec-0_2"]
+tinyvec-1 = ["dep:tinyvec-1"]
+triomphe-0_1 = ["dep:triomphe-0_1"]
+
+# Feature to enable everything - This is for developer usage
+# and would typically not be useful for users.
+__all = [
+  "std",
+  "default-hasher",
+  "getrandom",
+  "rkyv-0_8",
+  "serde",
+  "allocator-api2-0_4",
+  "allocator-api2-0_3",
+  "allocator-api2-0_2",
+  "arrayvec-0_7",
+  "bstr-1",
+  "bytes-1",
+  "either-1",
+  "smol_str-0_2",
+  "smol_str-0_3",
+  "thin-vec-0_2",
+  "tinyvec-1",
+  "triomphe-0_1",
+]
+

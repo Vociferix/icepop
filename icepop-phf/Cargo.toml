@@ -1,0 +1,21 @@
+[package]
+name = "icepop-phf"
+version = "0.1.0"
+edition = "2024"
+
+[package.metadata.docs.rs]
+rustdoc-args = ["--cfg", "docsrs"]
+all-features = true
+
+[dependencies]
+portable = { path = "../portable", default-features = false, features = ["default-hasher", "alloc"] }
+hashbrown = "0.17"
+rkyv = { version = "0.8", default-features = false, features = ["alloc", "bytecheck"], optional = true }
+serde = { version = "1", optional = true, default-features = false, features = ["alloc"] }
+equivalent = "1.0.2"
+
+[features]
+default = ["getrandom", "rkyv", "serde"]
+serde = ["dep:serde", "portable/serde"]
+rkyv = ["dep:rkyv", "portable/rkyv-0_8"]
+getrandom = ["portable/getrandom"]

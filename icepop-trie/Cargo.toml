@@ -1,0 +1,10 @@
+[package]
+name = "icepop-trie"
+version = "0.1.0"
+edition = "2024"
+
+[package.metadata.docs.rs]
+rustdoc-args = ["--cfg", "docsrs"]
+all-features = true
+
+[dependencies]

@@ -1,0 +1,21 @@
+[package]
+name = "icepop"
+version = "0.1.0"
+edition = "2024"
+
+[package.metadata.docs.rs]
+rustdoc-args = ["--cfg", "docsrs"]
+all-features = true
+
+[dependencies]
+icepop-filter = { path = "icepop-filter" }
+icepop-phf = { path = "icepop-phf" }
+icepop-trie = { path = "icepop-trie" }
+
+[workspace]
+members = [
+  "icepop-filter",
+  "icepop-phf",
+  "icepop-trie",
+  "portable",
+]
