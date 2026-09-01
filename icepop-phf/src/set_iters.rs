@@ -1,14 +1,64 @@
+//! Iterators shared by [`Set`](crate::Set) and [`OrderedSet`](crate::OrderedSet).
+
 use core::fmt;
 
+/// Borrowing iterator over a set's elements.
+///
+/// Created by [`Set::iter`](crate::Set::iter), [`OrderedSet::iter`](crate::OrderedSet::iter)
+/// and the corresponding builders. Elements arrive in the collection's own order: insertion
+/// order for an ordered set, an arbitrary order otherwise.
+///
+/// # Example
+///
+/// ```
+/// use icepop_phf::OrderedSet;
+///
+/// let set: OrderedSet<u32> = [3u32, 1, 2].into_iter().collect();
+///
+/// assert_eq!(set.iter().copied().collect::<Vec<_>>(), [3, 1, 2]);
+/// ```
 pub struct Iter<'a, T> {
     pub(crate) iter: core::slice::Iter<'a, T>,
 }
 
+/// Owning iterator over a set's elements.
+///
+/// Created by [`IntoIterator`] on a set or its builder.
+///
+/// # Example
+///
+/// ```
+/// use icepop_phf::OrderedSet;
+///
+/// let set: OrderedSet<String> = ["ash".to_string()].into_iter().collect();
+///
+/// assert_eq!(set.into_iter().collect::<Vec<_>>(), ["ash".to_string()]);
+/// ```
 #[derive(Clone)]
 pub struct IntoIter<T> {
     pub(crate) iter: alloc::vec::IntoIter<T>,
 }
 
+/// Borrowing iterator over an archived set's elements.
+///
+/// Created by [`ArchivedSet::iter`](crate::rkyv::ArchivedSet::iter) and
+/// [`ArchivedOrderedSet::iter`](crate::rkyv::ArchivedOrderedSet::iter). Yields elements in
+/// their archived form.
+///
+/// # Example
+///
+/// ```
+/// use icepop_phf::{PortableOrderedSet, rkyv::ArchivedOrderedSet};
+/// use rkyv::rancor::Error;
+///
+/// let set: PortableOrderedSet<u32> = [3u32, 1, 2].into_iter().collect();
+/// let bytes = rkyv::to_bytes::<Error>(&set)?;
+/// let archived = rkyv::access::<ArchivedOrderedSet<u32>, Error>(&bytes)?;
+///
+/// let elements: Vec<u32> = archived.iter().map(|e| e.to_native()).collect();
+/// assert_eq!(elements, [3, 1, 2]);
+/// # Ok::<(), Error>(())
+/// ```
 #[cfg(feature = "rkyv")]
 pub struct ArchivedIter<'a, T: rkyv::Archive> {
     pub(crate) iter: core::slice::Iter<'a, T::Archived>,

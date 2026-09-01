@@ -1,3 +1,12 @@
+//! The archived table, and the read interface the collections expose over it.
+//!
+//! Mirrors [`Table`](super::Table) field for field, in a `#[repr(C)]` layout with the fields
+//! ordered so that the two variable-length arrays come first. Lookup is the same two-round
+//! scheme, run against the archived hasher and archived keys.
+//!
+//! Mutation goes through [`rkyv::seal::Seal`], which is what keeps in-place edits from breaking
+//! the table: everything reachable from a sealed archive is a value, never a key.
+
 use super::{Portable, Table, unique_indices};
 use crate::portability::TableOps;
 
@@ -14,6 +23,11 @@ use alloc::boxed::Box;
 use core::hash::{BuildHasher, Hasher};
 use core::marker::PhantomData;
 
+/// A table read in place, out of a serialized buffer.
+///
+/// The same invariants as [`Table`](super::Table), but they arrive from untrusted bytes rather
+/// than from the builder, so the [`Verify`] implementation re-checks them before any unchecked
+/// access is allowed.
 #[derive(rkyv::Portable, CheckBytes)]
 #[bytecheck(crate = rkyv::bytecheck)]
 #[bytecheck(verify)]
@@ -31,6 +45,7 @@ where
     pub(crate) global_param: u8,
 }
 
+/// Offsets of the out-of-line pieces, filled in by `serialize` and consumed by `resolve`.
 pub struct TableResolver<O: TableOps, S = DefaultHasherSeed>
 where
     O::Entry: Archive,
@@ -53,6 +68,7 @@ where
     O::Indices: Archive,
     S: Archive,
 {
+    /// Rejects an archive whose arrays disagree in length or whose indices point out of bounds.
     fn verify(&self, _: &mut C) -> Result<(), C::Error> {
         #[derive(Debug)]
         struct LayoutError;
@@ -191,6 +207,12 @@ where
         self.entries.iter()
     }
 
+    /// Iterates the archived entries as plain mutable references.
+    ///
+    /// # Safety
+    ///
+    /// Keys must not be modified: a key that no longer hashes to its slot makes the table unable
+    /// to find its own entries. The sealed iterators are the safe way to reach values.
     pub unsafe fn iter_mut(
         this: rkyv::seal::Seal<'_, Self>,
     ) -> core::slice::IterMut<'_, Archived<O::Entry>> {
@@ -201,7 +223,15 @@ where
         &self.entries
     }
 
-    fn entries_seal(this: rkyv::seal::Seal<'_, Self>) -> &mut [Archived<O::Entry>] {
+    /// Unseals the entry array.
+    ///
+    /// # Safety
+    ///
+    /// The returned slice exposes whole entries, keys included. Nothing may be written through
+    /// it but values: a key that no longer hashes to its slot leaves the table unable to find
+    /// its own entries. Callers that hand any of this out publicly must reduce it to values
+    /// first, which is what the `*_seal` methods do.
+    unsafe fn entries_seal(this: rkyv::seal::Seal<'_, Self>) -> &mut [Archived<O::Entry>] {
         let table = unsafe { this.unseal_unchecked() };
         let entries = rkyv::seal::Seal::new(&mut table.entries);
         let slice = rkyv::boxed::ArchivedBox::get_seal(entries);
@@ -220,10 +250,16 @@ where
         entries.get_mut(index).map(rkyv::seal::Seal::new)
     }
 
+    /// # Safety
+    ///
+    /// `index` must be less than [`len`](Self::len).
     pub unsafe fn index_unchecked(&self, index: usize) -> &Archived<O::Entry> {
         unsafe { self.entries.get_unchecked(index) }
     }
 
+    /// # Safety
+    ///
+    /// `index` must be less than [`len`](Self::len).
     pub unsafe fn index_unchecked_seal(
         this: rkyv::seal::Seal<'_, Self>,
         index: usize,
@@ -243,6 +279,11 @@ where
     S: Archive,
     S::Archived: PortableBuildHasher,
 {
+    /// Runs the two hash rounds and returns the entry index the slot resolves to.
+    ///
+    /// # Safety
+    ///
+    /// The table must not be empty. An absent key yields an arbitrary in-bounds index.
     pub unsafe fn get_index_unchecked<Q>(&self, key: &Q) -> usize
     where
         Q: PortableHash + PortableEq<Archived<O::Key>> + ?Sized,
@@ -320,6 +361,9 @@ where
             .then_some(rkyv::seal::Seal::new(entry))
     }
 
+    /// # Safety
+    ///
+    /// The table must not be empty. An absent key yields an arbitrary entry.
     pub unsafe fn get_unchecked<Q>(&self, key: &Q) -> &Archived<O::Entry>
     where
         Q: PortableHash + PortableEq<Archived<O::Key>> + ?Sized,
@@ -328,6 +372,9 @@ where
         unsafe { self.entries.get_unchecked(idx) }
     }
 
+    /// # Safety
+    ///
+    /// The table must not be empty. An absent key yields an arbitrary entry.
     pub unsafe fn get_unchecked_seal<'a, Q>(
         this: rkyv::seal::Seal<'a, Self>,
         key: &Q,
@@ -370,6 +417,9 @@ where
         })
     }
 
+    /// # Safety
+    ///
+    /// `index` must be less than [`len`](Self::len).
     pub unsafe fn map_index_unchecked<'a>(
         &'a self,
         index: usize,
@@ -380,6 +430,9 @@ where
         (&entry.0, &entry.1)
     }
 
+    /// # Safety
+    ///
+    /// `index` must be less than [`len`](Self::len).
     pub unsafe fn map_index_unchecked_seal<'a>(
         this: rkyv::seal::Seal<'a, Self>,
         index: usize,
@@ -428,6 +481,9 @@ where
         })
     }
 
+    /// # Safety
+    ///
+    /// The table must not be empty. An absent key yields an arbitrary entry.
     pub unsafe fn map_get_key_value_unchecked<'a, Q>(
         &'a self,
         key: &Q,
@@ -441,6 +497,9 @@ where
         (&entry.0, &entry.1)
     }
 
+    /// # Safety
+    ///
+    /// The table must not be empty. An absent key yields an arbitrary entry.
     pub unsafe fn map_get_key_value_unchecked_seal<'a, Q>(
         this: rkyv::seal::Seal<'a, Self>,
         key: &Q,
@@ -481,6 +540,9 @@ where
         })
     }
 
+    /// # Safety
+    ///
+    /// The table must not be empty. An absent key yields an arbitrary value.
     pub unsafe fn map_get_unchecked<'a, Q>(&'a self, key: &Q) -> &'a Archived<V>
     where
         Q: PortableHash + PortableEq<Archived<O::Key>> + ?Sized,
@@ -492,6 +554,9 @@ where
         &entry.1
     }
 
+    /// # Safety
+    ///
+    /// The table must not be empty. An absent key yields an arbitrary value.
     pub unsafe fn map_get_unchecked_seal<'a, Q>(
         this: rkyv::seal::Seal<'a, Self>,
         key: &Q,
@@ -506,6 +571,10 @@ where
         rkyv::seal::Seal::new(&mut entry.1)
     }
 
+    /// # Panics
+    ///
+    /// Panics if two keys resolve to the same entry.
+    #[allow(clippy::type_complexity)]
     pub fn map_get_disjoint_key_value_seal<'a, Q, const N: usize>(
         this: rkyv::seal::Seal<'a, Self>,
         keys: [&Q; N],
@@ -514,7 +583,7 @@ where
         Q: PortableHash + PortableEq<Archived<O::Key>> + ?Sized,
     {
         let indices = keys.map(|key| this.get_index(key));
-        assert!(unique_indices(&indices), "duplicate keys found");
+        assert!(unique_indices(&indices), "duplicate key found");
         let entries = unsafe { Self::entries_seal(this) };
         indices.map(|idx| {
             idx.map(|idx| {
@@ -525,6 +594,9 @@ where
         })
     }
 
+    /// # Panics
+    ///
+    /// Panics if two keys resolve to the same entry.
     pub fn map_get_disjoint_seal<'a, Q, const N: usize>(
         this: rkyv::seal::Seal<'a, Self>,
         keys: [&Q; N],
@@ -534,7 +606,7 @@ where
         K::Archived: 'a,
     {
         let indices = keys.map(|key| this.get_index(key));
-        assert!(unique_indices(&indices), "duplicate keys found");
+        assert!(unique_indices(&indices), "duplicate key found");
         let entries = unsafe { Self::entries_seal(this) };
         indices.map(|idx| {
             idx.map(|idx| {
@@ -545,6 +617,10 @@ where
         })
     }
 
+    /// # Safety
+    ///
+    /// No two keys may resolve to the same entry; each value is handed out as a distinct seal.
+    #[allow(clippy::type_complexity)]
     pub unsafe fn map_get_disjoint_key_value_unchecked_seal<'a, Q, const N: usize>(
         this: rkyv::seal::Seal<'a, Self>,
         keys: [&Q; N],
@@ -563,6 +639,9 @@ where
         })
     }
 
+    /// # Safety
+    ///
+    /// No two keys may resolve to the same entry; each value is handed out as a distinct seal.
     pub unsafe fn map_get_disjoint_unchecked_seal<'a, Q, const N: usize>(
         this: rkyv::seal::Seal<'a, Self>,
         keys: [&Q; N],
@@ -641,6 +720,8 @@ cfg_select!(feature = "serde" => {
         Archived<O::Entry>: serde::Serialize,
         Archived<S>: serde::Serialize,
     {
+        /// Serializes an archived set in the same shape a live [`Table`](super::Table) produces, so
+        /// the two forms are interchangeable to a `serde` consumer.
         pub fn serialize_set<Ser>(&self, serializer: Ser) -> Result<Ser::Ok, Ser::Error>
         where
             Ser: serde::Serializer,
@@ -670,6 +751,10 @@ cfg_select!(feature = "serde" => {
         Archived<V>: serde::Serialize,
         Archived<S>: serde::Serialize,
     {
+        /// Serializes an archived map in the same shape a live [`Table`](super::Table) produces.
+        ///
+        /// Archived entries are `ArchivedTuple2`, not tuples, so they are re-projected into pairs on
+        /// the way out.
         pub fn serialize_map<Ser>(&self, serializer: Ser) -> Result<Ser::Ok, Ser::Error>
         where
             Ser: serde::Serializer,

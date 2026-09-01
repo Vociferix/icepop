@@ -1,61 +1,263 @@
+//! Iterators shared by [`Map`](crate::Map) and [`OrderedMap`](crate::OrderedMap).
+
 use core::fmt;
 
+/// Borrowing iterator over a map's entries.
+///
+/// Created by [`Map::iter`](crate::Map::iter), [`OrderedMap::iter`](crate::OrderedMap::iter)
+/// and the corresponding builders. Entries arrive in the collection's own order: insertion
+/// order for an ordered map, an arbitrary order otherwise.
+///
+/// # Example
+///
+/// ```
+/// use icepop_phf::OrderedMap;
+///
+/// let mut map: OrderedMap<&str, u32> = [("b", 2u32), ("a", 1)].into_iter().collect();
+///
+/// let entries: Vec<_> = map.iter().map(|(k, v)| (*k, *v)).collect();
+/// assert_eq!(entries, [("b", 2), ("a", 1)]);
+/// ```
 pub struct Iter<'a, K, V> {
     pub(crate) iter: core::slice::Iter<'a, (K, V)>,
 }
 
+/// Borrowing iterator over a map's entries, with mutable values.
+///
+/// Keys are yielded by shared reference: changing one would invalidate the hash function.
+///
+/// # Example
+///
+/// ```
+/// use icepop_phf::OrderedMap;
+///
+/// let mut map: OrderedMap<&str, u32> = [("b", 2u32), ("a", 1)].into_iter().collect();
+///
+/// for (_, value) in map.iter_mut() {
+///     *value *= 10;
+/// }
+///
+/// assert_eq!(map.get("a"), Some(&10));
+/// ```
 pub struct IterMut<'a, K, V> {
     pub(crate) iter: core::slice::IterMut<'a, (K, V)>,
 }
 
+/// Owning iterator over a map's entries.
+///
+/// Created by [`IntoIterator`] on a map or its builder.
+///
+/// # Example
+///
+/// ```
+/// use icepop_phf::OrderedMap;
+///
+/// let mut map: OrderedMap<&str, u32> = [("b", 2u32), ("a", 1)].into_iter().collect();
+///
+/// assert_eq!(map.into_iter().collect::<Vec<_>>(), [("b", 2), ("a", 1)]);
+/// ```
 #[derive(Clone)]
 pub struct IntoIter<K, V> {
     pub(crate) iter: alloc::vec::IntoIter<(K, V)>,
 }
 
+/// Borrowing iterator over a map's keys.
+///
+/// # Example
+///
+/// ```
+/// use icepop_phf::OrderedMap;
+///
+/// let mut map: OrderedMap<&str, u32> = [("b", 2u32), ("a", 1)].into_iter().collect();
+///
+/// assert_eq!(map.keys().copied().collect::<Vec<_>>(), ["b", "a"]);
+/// ```
 pub struct Keys<'a, K, V> {
     pub(crate) iter: core::slice::Iter<'a, (K, V)>,
 }
 
+/// Owning iterator over a map's keys, dropping its values.
+///
+/// # Example
+///
+/// ```
+/// use icepop_phf::OrderedMap;
+///
+/// let mut map: OrderedMap<&str, u32> = [("b", 2u32), ("a", 1)].into_iter().collect();
+///
+/// assert_eq!(map.into_keys().collect::<Vec<_>>(), ["b", "a"]);
+/// ```
 #[derive(Clone)]
 pub struct IntoKeys<K, V> {
     pub(crate) iter: alloc::vec::IntoIter<(K, V)>,
 }
 
+/// Borrowing iterator over a map's values.
+///
+/// # Example
+///
+/// ```
+/// use icepop_phf::OrderedMap;
+///
+/// let mut map: OrderedMap<&str, u32> = [("b", 2u32), ("a", 1)].into_iter().collect();
+///
+/// assert_eq!(map.values().copied().collect::<Vec<_>>(), [2, 1]);
+/// ```
 pub struct Values<'a, K, V> {
     pub(crate) iter: core::slice::Iter<'a, (K, V)>,
 }
 
+/// Borrowing iterator over a map's values, mutably.
+///
+/// # Example
+///
+/// ```
+/// use icepop_phf::OrderedMap;
+///
+/// let mut map: OrderedMap<&str, u32> = [("b", 2u32), ("a", 1)].into_iter().collect();
+///
+/// for value in map.values_mut() {
+///     *value *= 10;
+/// }
+///
+/// assert_eq!(map.values().copied().collect::<Vec<_>>(), [20, 10]);
+/// ```
 pub struct ValuesMut<'a, K, V> {
     pub(crate) iter: core::slice::IterMut<'a, (K, V)>,
 }
 
+/// Owning iterator over a map's values, dropping its keys.
+///
+/// # Example
+///
+/// ```
+/// use icepop_phf::OrderedMap;
+///
+/// let mut map: OrderedMap<&str, u32> = [("b", 2u32), ("a", 1)].into_iter().collect();
+///
+/// assert_eq!(map.into_values().collect::<Vec<_>>(), [2, 1]);
+/// ```
 #[derive(Clone)]
 pub struct IntoValues<K, V> {
     pub(crate) iter: alloc::vec::IntoIter<(K, V)>,
 }
 
+/// Borrowing iterator over an archived map's entries.
+///
+/// Yields keys and values in their archived form.
+///
+/// # Example
+///
+/// ```
+/// use icepop_phf::{PortableOrderedMap, rkyv::ArchivedOrderedMap};
+/// use rkyv::rancor::Error;
+///
+/// let map: PortableOrderedMap<String, u32> =
+///     [("b".to_string(), 2u32), ("a".to_string(), 1)].into_iter().collect();
+/// let bytes = rkyv::to_bytes::<Error>(&map)?;
+/// let archived = rkyv::access::<ArchivedOrderedMap<String, u32>, Error>(&bytes)?;
+///
+/// let entries: Vec<_> = archived.iter().map(|(k, v)| (k.as_str(), v.to_native())).collect();
+/// assert_eq!(entries, [("b", 2), ("a", 1)]);
+/// # Ok::<(), Error>(())
+/// ```
 #[cfg(feature = "rkyv")]
 pub struct ArchivedIter<'a, K: rkyv::Archive, V: rkyv::Archive> {
     pub(crate) iter: core::slice::Iter<'a, rkyv::tuple::ArchivedTuple2<K::Archived, V::Archived>>,
 }
 
+/// Borrowing iterator over an archived map's entries, with editable values.
+///
+/// Keys are yielded by shared reference: changing one would invalidate the hash function.
+///
+/// # Example
+///
+/// ```
+/// use icepop_phf::{PortableOrderedMap, rkyv::ArchivedOrderedMap};
+/// use rkyv::rancor::Error;
+///
+/// let map: PortableOrderedMap<String, u32> =
+///     [("b".to_string(), 2u32), ("a".to_string(), 1)].into_iter().collect();
+/// let mut bytes = rkyv::to_bytes::<Error>(&map)?;
+/// let archived = rkyv::access_mut::<ArchivedOrderedMap<String, u32>, Error>(&mut bytes)?;
+///
+/// for (_, value) in ArchivedOrderedMap::iter_seal(archived) {
+///     *rkyv::seal::Seal::unseal(value) = 9.into();
+/// }
+///
+/// let archived = rkyv::access::<ArchivedOrderedMap<String, u32>, Error>(&bytes)?;
+/// assert_eq!(archived.get("a").map(|v| v.to_native()), Some(9));
+/// # Ok::<(), Error>(())
+/// ```
 #[cfg(feature = "rkyv")]
 pub struct ArchivedIterSeal<'a, K: rkyv::Archive, V: rkyv::Archive> {
     pub(crate) iter:
         core::slice::IterMut<'a, rkyv::tuple::ArchivedTuple2<K::Archived, V::Archived>>,
 }
 
+/// Borrowing iterator over an archived map's keys.
+///
+/// # Example
+///
+/// ```
+/// use icepop_phf::{PortableOrderedMap, rkyv::ArchivedOrderedMap};
+/// use rkyv::rancor::Error;
+///
+/// let map: PortableOrderedMap<String, u32> =
+///     [("b".to_string(), 2u32), ("a".to_string(), 1)].into_iter().collect();
+/// let bytes = rkyv::to_bytes::<Error>(&map)?;
+/// let archived = rkyv::access::<ArchivedOrderedMap<String, u32>, Error>(&bytes)?;
+///
+/// assert_eq!(archived.keys().map(|k| k.as_str()).collect::<Vec<_>>(), ["b", "a"]);
+/// # Ok::<(), Error>(())
+/// ```
 #[cfg(feature = "rkyv")]
 pub struct ArchivedKeys<'a, K: rkyv::Archive, V: rkyv::Archive> {
     pub(crate) iter: core::slice::Iter<'a, rkyv::tuple::ArchivedTuple2<K::Archived, V::Archived>>,
 }
 
+/// Borrowing iterator over an archived map's values.
+///
+/// # Example
+///
+/// ```
+/// use icepop_phf::{PortableOrderedMap, rkyv::ArchivedOrderedMap};
+/// use rkyv::rancor::Error;
+///
+/// let map: PortableOrderedMap<String, u32> =
+///     [("b".to_string(), 2u32), ("a".to_string(), 1)].into_iter().collect();
+/// let bytes = rkyv::to_bytes::<Error>(&map)?;
+/// let archived = rkyv::access::<ArchivedOrderedMap<String, u32>, Error>(&bytes)?;
+///
+/// assert_eq!(archived.values().map(|v| v.to_native()).collect::<Vec<_>>(), [2, 1]);
+/// # Ok::<(), Error>(())
+/// ```
 #[cfg(feature = "rkyv")]
 pub struct ArchivedValues<'a, K: rkyv::Archive, V: rkyv::Archive> {
     pub(crate) iter: core::slice::Iter<'a, rkyv::tuple::ArchivedTuple2<K::Archived, V::Archived>>,
 }
 
+/// Borrowing iterator over an archived map's values, each editable in place.
+///
+/// # Example
+///
+/// ```
+/// use icepop_phf::{PortableOrderedMap, rkyv::ArchivedOrderedMap};
+/// use rkyv::rancor::Error;
+///
+/// let map: PortableOrderedMap<String, u32> =
+///     [("b".to_string(), 2u32), ("a".to_string(), 1)].into_iter().collect();
+/// let mut bytes = rkyv::to_bytes::<Error>(&map)?;
+/// let archived = rkyv::access_mut::<ArchivedOrderedMap<String, u32>, Error>(&mut bytes)?;
+///
+/// for value in ArchivedOrderedMap::values_seal(archived) {
+///     *rkyv::seal::Seal::unseal(value) = 9.into();
+/// }
+///
+/// let archived = rkyv::access::<ArchivedOrderedMap<String, u32>, Error>(&bytes)?;
+/// assert_eq!(archived.get("a").map(|v| v.to_native()), Some(9));
+/// # Ok::<(), Error>(())
+/// ```
 #[cfg(feature = "rkyv")]
 pub struct ArchivedValuesSeal<'a, K: rkyv::Archive, V: rkyv::Archive> {
     pub(crate) iter:
@@ -691,7 +893,7 @@ impl<K: rkyv::Archive, V: rkyv::Archive> Clone for ArchivedIter<'_, K, V> {
 }
 
 #[cfg(feature = "rkyv")]
-impl<'a, K: rkyv::Archive, V: rkyv::Archive> fmt::Debug for ArchivedIter<'_, K, V>
+impl<K: rkyv::Archive, V: rkyv::Archive> fmt::Debug for ArchivedIter<'_, K, V>
 where
     K::Archived: fmt::Debug,
     V::Archived: fmt::Debug,
@@ -776,7 +978,7 @@ impl<K: rkyv::Archive, V: rkyv::Archive> ExactSizeIterator for ArchivedIterSeal<
 impl<K: rkyv::Archive, V: rkyv::Archive> core::iter::FusedIterator for ArchivedIterSeal<'_, K, V> {}
 
 #[cfg(feature = "rkyv")]
-impl<'a, K: rkyv::Archive, V: rkyv::Archive> fmt::Debug for ArchivedIterSeal<'_, K, V>
+impl<K: rkyv::Archive, V: rkyv::Archive> fmt::Debug for ArchivedIterSeal<'_, K, V>
 where
     K::Archived: fmt::Debug,
     V::Archived: fmt::Debug,
@@ -856,7 +1058,7 @@ impl<K: rkyv::Archive, V: rkyv::Archive> Clone for ArchivedKeys<'_, K, V> {
 }
 
 #[cfg(feature = "rkyv")]
-impl<'a, K: rkyv::Archive, V: rkyv::Archive> fmt::Debug for ArchivedKeys<'_, K, V>
+impl<K: rkyv::Archive, V: rkyv::Archive> fmt::Debug for ArchivedKeys<'_, K, V>
 where
     K::Archived: fmt::Debug,
 {
@@ -928,7 +1130,7 @@ impl<K: rkyv::Archive, V: rkyv::Archive> ExactSizeIterator for ArchivedValues<'_
 impl<K: rkyv::Archive, V: rkyv::Archive> core::iter::FusedIterator for ArchivedValues<'_, K, V> {}
 
 #[cfg(feature = "rkyv")]
-impl<'a, K: rkyv::Archive, V: rkyv::Archive> fmt::Debug for ArchivedValues<'_, K, V>
+impl<K: rkyv::Archive, V: rkyv::Archive> fmt::Debug for ArchivedValues<'_, K, V>
 where
     V::Archived: fmt::Debug,
 {
@@ -1017,7 +1219,7 @@ impl<K: rkyv::Archive, V: rkyv::Archive> core::iter::FusedIterator
 }
 
 #[cfg(feature = "rkyv")]
-impl<'a, K: rkyv::Archive, V: rkyv::Archive> fmt::Debug for ArchivedValuesSeal<'_, K, V>
+impl<K: rkyv::Archive, V: rkyv::Archive> fmt::Debug for ArchivedValuesSeal<'_, K, V>
 where
     V::Archived: fmt::Debug,
 {

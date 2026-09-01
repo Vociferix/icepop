@@ -1,3 +1,25 @@
+//! The table every collection in this crate wraps.
+//!
+//! One implementation serves maps and sets, ordered and unordered, portable and not: `O` supplies
+//! the entry shape via [`TableOps`](crate::portability::TableOps) and `P` supplies the hashing and
+//! comparison interface via the `*Ops` traits. The public collections are thin newtypes that
+//! re-expose the slice of this API that makes sense for them, under concrete trait bounds.
+//!
+//! # Lookup
+//!
+//! The minimal perfect hash function is the two-round CHD scheme the builder constructs:
+//!
+//! 1. Hash `global_param` then the key, and reduce modulo `len` to get a bucket.
+//! 2. Feed that bucket's displacement `params[bucket]` into the *same* hasher and reduce again.
+//!    The result is a slot, unique across all keys by construction.
+//! 3. Map the slot to an entry index. Ordered tables read `indices[slot]`; unordered tables were
+//!    permuted at build time so that the slot is already the index.
+//!
+//! Nothing about this rules out a key that was never inserted: an absent key still lands on some
+//! slot, and some entry. That is why every lookup that promises an answer compares the key against
+//! the entry it found, and why the `*_unchecked` variants are `unsafe` only in that they skip the
+//! empty-table check.
+
 use crate::portability::{
     BuildHasherOps, EqOps, HashOps, HasherOps, NonPortable, Portable, TableOps,
 };
@@ -13,11 +35,22 @@ pub mod rkyv;
 
 mod builder;
 
-pub use builder::{Builder, OrderedTableImpl, TableImpl};
+pub use builder::Builder;
 
+/// A built table: entries plus the parameters that address them.
+///
+/// # Invariants
+///
+/// `params` and `entries` have the same length, `indices` too when
+/// [`HAVE_INDICES`](TableOps::HAVE_INDICES), and every value in `indices` is a valid index into
+/// `entries`. The builder establishes these; [`TableOps::verify`](crate::portability::TableOps::verify)
+/// re-establishes them for a table that arrived by deserialization.
 pub struct Table<O: TableOps, S = DefaultHasherSeed, P = NonPortable> {
+    /// Mixed into the hasher before every key. Bumped when a seed fails to yield a perfect hash.
     pub(crate) global_param: u8,
+    /// Per-bucket displacement, indexed by the first hash reduced modulo `entries.len()`.
     pub(crate) params: Box<[u32]>,
+    /// Slot to entry index, or `()` when entries were permuted so that slot equals index.
     pub(crate) indices: O::Indices,
     pub(crate) entries: Box<[O::Entry]>,
     pub(crate) hasher_builder: S,
@@ -60,10 +93,16 @@ where
         self.entries.get_mut(index)
     }
 
+    /// # Safety
+    ///
+    /// `index` must be less than [`len`](Self::len).
     pub unsafe fn index_unchecked(&self, index: usize) -> &O::Entry {
         unsafe { self.entries.get_unchecked(index) }
     }
 
+    /// # Safety
+    ///
+    /// `index` must be less than [`len`](Self::len).
     pub unsafe fn index_unchecked_mut(&mut self, index: usize) -> &mut O::Entry {
         unsafe { self.entries.get_unchecked_mut(index) }
     }
@@ -81,11 +120,17 @@ where
         self.index_mut(index).map(|(k, v)| (&*k, v))
     }
 
+    /// # Safety
+    ///
+    /// `index` must be less than [`len`](Self::len).
     pub unsafe fn map_index_unchecked(&self, index: usize) -> (&K, &V) {
         let (k, v) = unsafe { self.index_unchecked(index) };
         (k, v)
     }
 
+    /// # Safety
+    ///
+    /// `index` must be less than [`len`](Self::len).
     pub unsafe fn map_index_unchecked_mut(&mut self, index: usize) -> (&K, &mut V) {
         let (k, v) = unsafe { self.index_unchecked_mut(index) };
         (&*k, v)
@@ -99,6 +144,15 @@ where
     u8: HashOps<S, P>,
     u32: HashOps<S, P>,
 {
+    /// Runs the two hash rounds and returns the entry index the slot resolves to.
+    ///
+    /// The result is in bounds for any key, present or not, so callers that need an answer about
+    /// `key` must still compare it against the entry found.
+    ///
+    /// # Safety
+    ///
+    /// The table must not be empty. The modulus is the entry count, and the hint that it is
+    /// non-zero is what lets the two reductions compile without a zero check.
     pub unsafe fn get_index_unchecked<Q>(&self, key: &Q) -> usize
     where
         Q: HashOps<S, P> + EqOps<O::Key, P> + ?Sized,
@@ -172,6 +226,9 @@ where
         key.eq(O::get_key(entry)).then_some(entry)
     }
 
+    /// # Safety
+    ///
+    /// The table must not be empty. An absent key yields an arbitrary entry.
     pub unsafe fn get_unchecked<Q>(&self, key: &Q) -> &O::Entry
     where
         Q: HashOps<S, P> + EqOps<O::Key, P> + ?Sized,
@@ -180,6 +237,9 @@ where
         unsafe { self.entries.get_unchecked(idx) }
     }
 
+    /// # Safety
+    ///
+    /// The table must not be empty. An absent key yields an arbitrary entry.
     pub unsafe fn get_unchecked_mut<Q>(&mut self, key: &Q) -> &mut O::Entry
     where
         Q: HashOps<S, P> + EqOps<O::Key, P> + ?Sized,
@@ -226,6 +286,9 @@ where
         self.get_mut(key).map(|(_, v)| v)
     }
 
+    /// # Safety
+    ///
+    /// The table must not be empty. An absent key yields an arbitrary entry.
     pub unsafe fn map_get_key_value_unchecked<Q>(&self, key: &Q) -> (&K, &V)
     where
         Q: HashOps<S, P> + EqOps<K, P> + ?Sized,
@@ -234,6 +297,9 @@ where
         (k, v)
     }
 
+    /// # Safety
+    ///
+    /// The table must not be empty. An absent key yields an arbitrary entry.
     pub unsafe fn map_get_key_value_unchecked_mut<Q>(&mut self, key: &Q) -> (&K, &mut V)
     where
         Q: HashOps<S, P> + EqOps<K, P> + ?Sized,
@@ -242,6 +308,9 @@ where
         (&*k, v)
     }
 
+    /// # Safety
+    ///
+    /// The table must not be empty. An absent key yields an arbitrary value.
     pub unsafe fn map_get_unchecked<'a, Q>(&'a self, key: &Q) -> &'a V
     where
         Q: HashOps<S, P> + EqOps<K, P> + ?Sized,
@@ -250,6 +319,9 @@ where
         &unsafe { self.get_unchecked(key) }.1
     }
 
+    /// # Safety
+    ///
+    /// The table must not be empty. An absent key yields an arbitrary value.
     pub unsafe fn map_get_unchecked_mut<'a, Q>(&'a mut self, key: &Q) -> &'a mut V
     where
         Q: HashOps<S, P> + EqOps<K, P> + ?Sized,
@@ -258,6 +330,9 @@ where
         &mut unsafe { self.get_unchecked_mut(key) }.1
     }
 
+    /// # Panics
+    ///
+    /// Panics if two keys resolve to the same entry.
     pub fn map_get_disjoint_key_value_mut<'a, Q, const N: usize>(
         &'a mut self,
         keys: [&Q; N],
@@ -267,7 +342,7 @@ where
         K: 'a,
     {
         let indices = keys.map(|key| self.get_index(key));
-        assert!(unique_indices(&indices), "duplicate keys found");
+        assert!(unique_indices(&indices), "duplicate key found");
         indices.map(|idx| {
             idx.map(|idx| {
                 let (k, v) = unsafe { &mut *self.entries.as_mut_ptr().add(idx) };
@@ -276,6 +351,9 @@ where
         })
     }
 
+    /// # Panics
+    ///
+    /// Panics if two keys resolve to the same entry.
     pub fn map_get_disjoint_mut<'a, Q, const N: usize>(
         &'a mut self,
         keys: [&Q; N],
@@ -289,6 +367,9 @@ where
         indices.map(|idx| idx.map(|idx| unsafe { &mut (*self.entries.as_mut_ptr().add(idx)).1 }))
     }
 
+    /// # Safety
+    ///
+    /// No two keys may resolve to the same entry; each is handed out as a distinct `&mut`.
     pub unsafe fn map_get_disjoint_key_value_unchecked_mut<'a, Q, const N: usize>(
         &'a mut self,
         keys: [&Q; N],
@@ -305,6 +386,9 @@ where
         })
     }
 
+    /// # Safety
+    ///
+    /// No two keys may resolve to the same entry; each is handed out as a distinct `&mut`.
     pub unsafe fn map_get_disjoint_unchecked_mut<'a, Q, const N: usize>(
         &'a mut self,
         keys: [&Q; N],
@@ -411,6 +495,7 @@ where
 {
 }
 
+/// Whether no index appears twice. `None`s are ignored, being absent keys.
 #[inline]
 fn unique_indices(mut indices: &[Option<usize>]) -> bool {
     while let Some((&first, rest)) = indices.split_first() {
@@ -462,6 +547,7 @@ where
     where
         D: serde::Deserializer<'de>,
     {
+        #[allow(clippy::type_complexity)]
         struct Visitor<O, S>(core::marker::PhantomData<fn() -> (PhantomData<O>, S)>);
 
         enum Field {

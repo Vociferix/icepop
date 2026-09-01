@@ -1,3 +1,15 @@
+//! The portability type parameter and the trait indirection it selects.
+//!
+//! Every collection carries a `P` parameter that is either [`NonPortable`] or [`Portable`].
+//! The lookup and build code is written once against the `*Ops` traits in this module, each of
+//! which has one blanket implementation per marker: [`NonPortable`] resolves to the standard
+//! [`Hash`]/[`BuildHasher`]/`Equivalent` interface, [`Portable`] to the equivalents from the
+//! `portable` crate. Because both markers are uninhabited, `P` only ever selects
+//! implementations; it never occupies space or reaches runtime.
+//!
+//! [`TableOps`] is a second, unrelated axis: it names the entry, key, value and index-array
+//! types that distinguish a map from a set and an ordered collection from an unordered one.
+
 use crate::table::Table;
 
 #[cfg(feature = "rkyv")]
@@ -11,12 +23,63 @@ use core::marker::PhantomData;
 
 use alloc::boxed::Box;
 
+/// Marker selecting the standard, process-local lookup interface.
+///
+/// Keys are hashed with [`Hash`] and compared with [`Equivalent`], and the hasher need only
+/// implement [`BuildHasher`]. Nothing is required to be reproducible, so the hasher can be
+/// chosen purely for speed, but the resulting collection is meaningful only inside the process
+/// that built it and supports neither `serde` nor `rkyv`. Use [`Portable`] for anything that
+/// leaves the process.
+///
+/// This is the default for every collection, and the type is uninhabited: it exists only to
+/// pick trait implementations.
+///
+/// # Example
+///
+/// ```
+/// use icepop_phf::{DefaultHasherSeed, Map, NonPortable};
+///
+/// // The default `P`, so both annotations name the same type.
+/// let implied: Map<&str, u32> = [("a", 1)].into_iter().collect();
+/// let spelled: Map<&str, u32, DefaultHasherSeed, NonPortable> = [("a", 1)].into_iter().collect();
+///
+/// assert_eq!(implied.get("a"), spelled.get("a"));
+/// ```
+///
+/// [`Equivalent`]: https://docs.rs/equivalent/1/equivalent/trait.Equivalent.html
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum NonPortable {}
 
+/// Marker selecting the platform-independent lookup interface.
+///
+/// Keys are hashed with [`PortableHash`] and compared with [`PortableEq`], and the hasher must
+/// implement [`PortableBuildHasher`]. Those traits produce the same bytes and the same hash on
+/// every target, so a collection built here can be serialized, moved to a machine with
+/// different endianness or pointer width, and read there. Only these collections implement the
+/// `serde` and `rkyv` traits.
+///
+/// The type is uninhabited: it exists only to pick trait implementations. The `Portable*`
+/// aliases, such as [`PortableMap`](crate::PortableMap), name the collections that use it.
+///
+/// # Example
+///
+/// ```
+/// use icepop_phf::{DefaultHasherSeed, Map, Portable, PortableMap};
+///
+/// // The alias and the spelled-out form are the same type.
+/// let aliased: PortableMap<&str, u32> = [("a", 1)].into_iter().collect();
+/// let spelled: Map<&str, u32, DefaultHasherSeed, Portable> = [("a", 1)].into_iter().collect();
+///
+/// assert_eq!(aliased.get("a"), spelled.get("a"));
+/// ```
+///
+/// [`PortableBuildHasher`]: portable::PortableBuildHasher
+/// [`PortableEq`]: portable::PortableEq
+/// [`PortableHash`]: portable::PortableHash
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Portable {}
 
+/// Builds hashers, under whichever hashing interface `P` selects.
 pub trait BuildHasherOps<P>: Sized {
     type Hasher: HasherOps<P>;
 
@@ -32,32 +95,64 @@ pub trait BuildHasherOps<P>: Sized {
     }
 }
 
+/// Finishes a hash, under whichever hashing interface `P` selects.
 pub trait HasherOps<P> {
     fn finish(&self) -> u64;
 }
 
+/// Feeds a value to a hasher, under whichever hashing interface `P` selects.
 pub trait HashOps<S: BuildHasherOps<P>, P> {
     fn hash(&self, state: &mut S::Hasher);
 }
 
+/// Compares a lookup key against a stored key, under whichever interface `P` selects.
+///
+/// Both interfaces admit borrowed lookup keys: `Equivalent` for [`NonPortable`], and
+/// `PortableEq`'s cross-type comparison for [`Portable`].
 pub trait EqOps<K: ?Sized, P> {
     fn eq(&self, other: &K) -> bool;
 }
 
+/// The shape of a table: what an entry is, and whether hash slots are indirected.
+///
+/// One implementation per collection kind. A map entry is a `(K, V)` pair and a set entry is
+/// the element itself, which is why `Key` and `Value` are named separately from `Entry`. An
+/// ordered collection sets `Indices` to `Box<[u32]>` and [`HAVE_INDICES`](Self::HAVE_INDICES),
+/// so a hash slot is looked up in that array to find the entry; an unordered one sets
+/// `Indices` to `()` and uses the slot as the entry index directly.
 pub trait TableOps: Sized {
+    /// What one element of the entry array is: `(K, V)` for a map, `T` for a set.
     type Entry: Sized;
+
+    /// The part of an entry that is hashed and compared.
     type Key: Sized;
+
+    /// The part of an entry a map lookup returns; `()` for a set.
     type Value: Sized;
+
+    /// `Box<[u32]>` mapping hash slots to entry indices, or `()` when slots are indices.
     type Indices: Sized;
 
+    /// Whether [`Indices`](Self::Indices) is a real array, and so must be built and validated.
     const HAVE_INDICES: bool;
 
+    /// Borrows the key out of an entry.
     fn get_key(entry: &Self::Entry) -> &Self::Key;
 
+    /// Resolves a hash slot to an entry index.
+    ///
+    /// # Safety
+    ///
+    /// `slot` must be less than the number of entries.
     unsafe fn get_index(indices: &Self::Indices, slot: usize) -> usize;
 
+    /// Checks that a table's arrays agree in length and that every index is in bounds.
+    ///
+    /// Deserialization builds a table from untrusted input, so the invariants the builder
+    /// establishes must be re-established here before any unchecked access is allowed.
     fn verify<S>(table: &Table<Self, S, Portable>) -> bool;
 
+    /// Borrows the key out of an archived entry.
     #[cfg(feature = "rkyv")]
     fn get_key_archived<'a>(
         entry: &'a rkyv::Archived<Self::Entry>,
@@ -67,11 +162,17 @@ pub trait TableOps: Sized {
         Self::Key: rkyv::Archive,
         Self::Value: rkyv::Archive + 'a;
 
+    /// Resolves a hash slot to an entry index, in an archived table.
+    ///
+    /// # Safety
+    ///
+    /// `slot` must be less than the number of entries.
     #[cfg(feature = "rkyv")]
     unsafe fn get_index_archived(indices: &rkyv::Archived<Self::Indices>, slot: usize) -> usize
     where
         Self::Indices: rkyv::Archive;
 
+    /// [`verify`](Self::verify) for an archived table, run by `bytecheck` during validation.
     #[cfg(feature = "rkyv")]
     fn verify_archived<S>(table: &ArchivedTable<Self, S>) -> bool
     where
@@ -79,6 +180,7 @@ pub trait TableOps: Sized {
         Self::Entry: rkyv::Archive,
         Self::Indices: rkyv::Archive;
 
+    /// The archived index array, or an empty slice when there is none to serialize.
     #[cfg(all(feature = "rkyv", feature = "serde"))]
     fn archived_indices<S>(table: &ArchivedTable<Self, S>) -> &[rkyv::Archived<u32>]
     where
@@ -87,12 +189,16 @@ pub trait TableOps: Sized {
         Self::Indices: rkyv::Archive;
 }
 
+/// [`TableOps`] for a map that keeps insertion order.
 pub struct OrderedMapOps<K, V>(PhantomData<fn(K, V)>);
 
+/// [`TableOps`] for a map whose entries are permuted into hash-slot order.
 pub struct MapOps<K, V>(PhantomData<fn(K, V)>);
 
+/// [`TableOps`] for a set that keeps insertion order.
 pub struct OrderedSetOps<T>(PhantomData<fn(T)>);
 
+/// [`TableOps`] for a set whose entries are permuted into hash-slot order.
 pub struct SetOps<T>(PhantomData<fn(T)>);
 
 impl<K, V> TableOps for OrderedMapOps<K, V> {

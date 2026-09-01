@@ -1,20 +1,31 @@
+//! The mutable staging table, and the minimal perfect hash function construction.
+//!
+//! Entries live in a `Vec` in insertion order; a `hashbrown` side table maps a key's hash to its
+//! index in that `Vec`, so the builder behaves like an ordinary hash table while entries are being
+//! collected. Freezing happens in [`build_ordered`], which is the only expensive step.
+//!
+//! Indices are `u32`, which caps a table at `u32::MAX - 1` entries. Every insertion path asserts
+//! the cap rather than silently truncating.
+
 use crate::portability::{
     BuildHasherOps, EqOps, HashOps, HasherOps, MapOps, NonPortable, OrderedMapOps, OrderedSetOps,
-    Portable, SetOps, TableOps,
+    SetOps, TableOps,
 };
 use crate::table::Table;
 
-use equivalent::Equivalent;
 use hashbrown::hash_table::{Entry, HashTable};
 
-use portable::{DefaultHasherSeed, PortableBuildHasher, PortableEq, PortableHash};
+use portable::DefaultHasherSeed;
 
-use core::hash::{BuildHasher, Hash, Hasher};
 use core::marker::PhantomData;
 
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 
+/// Entries in insertion order, plus a hash index into them.
+///
+/// `table` holds `(entry index, hash)` pairs; the cached hash lets the table be resized and
+/// rehashed without touching the keys.
 pub struct Builder<O: TableOps, S = DefaultHasherSeed, P = NonPortable> {
     entries: Vec<O::Entry>,
     table: HashTable<(u32, u64)>,
@@ -22,6 +33,8 @@ pub struct Builder<O: TableOps, S = DefaultHasherSeed, P = NonPortable> {
     _portable: PhantomData<P>,
 }
 
+/// The pieces of a built unordered table, before they are wrapped in a
+/// [`Table`](super::Table).
 pub struct TableImpl<T, S> {
     pub hasher_builder: S,
     pub entries: Box<[T]>,
@@ -29,22 +42,17 @@ pub struct TableImpl<T, S> {
     pub params: Box<[u32]>,
 }
 
+/// The pieces of a built ordered table, before they are wrapped in a
+/// [`Table`](super::Table).
+///
+/// Differs from [`TableImpl`] only by `indices`, the slot-to-entry map that keeping insertion
+/// order requires.
 pub struct OrderedTableImpl<T, S> {
     pub hasher_builder: S,
     pub entries: Box<[T]>,
     pub global_param: u8,
     pub params: Box<[u32]>,
     pub indices: Box<[u32]>,
-}
-
-impl<O: TableOps, P> Builder<O, DefaultHasherSeed, P> {
-    pub fn new() -> Self {
-        Self::with_hasher(DefaultHasherSeed::new())
-    }
-
-    pub fn with_capacity(capacity: usize) -> Self {
-        Self::with_capacity_and_hasher(capacity, DefaultHasherSeed::new())
-    }
 }
 
 impl<O: TableOps, S, P> Builder<O, S, P> {
@@ -110,6 +118,10 @@ impl<O: TableOps, S, P> Builder<O, S, P> {
         self.entries.shrink_to(min_capacity);
         self.table.shrink_to(min_capacity, move |&(_, h)| h);
     }
+
+    pub fn as_slice(&self) -> &[O::Entry] {
+        &self.entries
+    }
 }
 
 impl<O, S, P> Builder<O, S, P>
@@ -153,6 +165,10 @@ where
             .map(|&(idx, _)| &mut self.entries[idx as usize])
     }
 
+    /// # Panics
+    ///
+    /// Panics if `default()` produces an entry whose key is not equal to `key`, since the table
+    /// would then be unable to find it again, or if the table is already at its entry cap.
     pub fn get_or_insert_with<Q, F>(&mut self, key: &Q, default: F) -> &O::Entry
     where
         Q: HashOps<S, P> + EqOps<O::Key, P> + ?Sized,
@@ -197,6 +213,9 @@ where
     S: BuildHasherOps<P>,
     O::Key: HashOps<S, P> + EqOps<O::Key, P>,
 {
+    /// # Panics
+    ///
+    /// Panics if the table is already at its entry cap.
     pub fn replace(&mut self, mut value: O::Entry) -> Option<O::Entry> {
         let hash = self.hasher_builder.hash_one(O::get_key(&value));
         let entries = &mut self.entries;
@@ -231,6 +250,9 @@ where
         }
     }
 
+    /// # Panics
+    ///
+    /// Panics if the table is already at its entry cap.
     pub fn insert(&mut self, value: O::Entry) -> bool {
         let hash = self.hasher_builder.hash_one(O::get_key(&value));
         let entries = &mut self.entries;
@@ -257,6 +279,9 @@ where
         }
     }
 
+    /// # Panics
+    ///
+    /// Panics if the table is already at its entry cap.
     pub fn get_or_insert(&mut self, value: O::Entry) -> &O::Entry {
         let hash = self.hasher_builder.hash_one(O::get_key(&value));
         let entries = &mut self.entries;
@@ -284,6 +309,11 @@ where
         }
     }
 
+    /// Removes an entry, closing the hole it leaves in two different ways.
+    ///
+    /// An ordered table shifts the tail down and decrements every larger index, keeping insertion
+    /// order at `O(n)`. An unordered one swaps the last entry into the hole and repoints just that
+    /// entry's index, which is `O(1)` but reorders.
     pub fn take<Q>(&mut self, key: &Q) -> Option<O::Entry>
     where
         Q: HashOps<S, P> + EqOps<O::Key, P> + ?Sized,
@@ -387,6 +417,15 @@ where
     K: HashOps<S, P> + EqOps<K, P>,
     S: BuildHasherOps<P>,
 {
+    /// Replaces a value with one computed from the old value, moved out by value.
+    ///
+    /// The old value has to leave the `Vec` before `update` can consume it, which leaves the
+    /// builder briefly inconsistent. `Guard` restores it if `update` panics: the entry stays
+    /// removed, but the index table and the insertion order agree again.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the table is already at its entry cap.
     pub fn map_upsert<F>(&mut self, key: K, update: F) -> bool
     where
         F: FnOnce(Option<V>) -> V,
@@ -640,6 +679,26 @@ where
     }
 }
 
+/// Constructs the minimal perfect hash function over `entries`.
+///
+/// The CHD construction, in three phases:
+///
+/// 1. **Seed.** Hash every key under `global_param`. If two keys collide in 64 bits no
+///    displacement can separate them, so bump `global_param` and start over.
+/// 2. **Bucket.** Reduce each key's hash modulo `len` and group keys by the result. Sort the
+///    buckets largest first, so the hardest ones are placed while slots are still plentiful.
+/// 3. **Displace.** For each bucket in turn, search for a displacement `d` that sends all of
+///    its keys to free slots when fed to the same hasher after the key. A conflict releases
+///    the slots claimed for that bucket and retries with `d + 1`. Exhausting `d` means this
+///    seed cannot be completed, so `global_param` is bumped and everything restarts.
+///
+/// Since there are exactly as many slots as entries and every entry claims one, the result is
+/// both perfect and minimal, and `indices` ends up a permutation of `0..len`.
+///
+/// # Panics
+///
+/// Panics once `global_param` is exhausted, in either phase. Reaching that with a sound hasher
+/// is not realistic; it means the hasher collides on distinct keys or clusters them badly.
 fn build_ordered<O, S, P>(
     entries: Vec<O::Entry>,
     hasher_builder: S,
@@ -760,6 +819,11 @@ where
 }
 
 impl<T, S> OrderedTableImpl<T, S> {
+    /// Applies `indices` to `entries` in place, so that a slot is its own entry index.
+    ///
+    /// `indices` is a permutation, so it can be applied by walking each cycle and swapping along
+    /// it, which is what lets the unordered tables drop the array entirely and save four bytes per
+    /// entry plus an indirection per lookup. Insertion order is lost.
     fn into_unordered(self) -> TableImpl<T, S> {
         let Self {
             hasher_builder,

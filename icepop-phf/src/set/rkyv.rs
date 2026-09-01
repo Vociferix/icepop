@@ -1,3 +1,5 @@
+//! The archived form of a [`PortableSet`](crate::PortableSet).
+
 use super::Set;
 use crate::portability::{Portable, SetOps};
 use crate::table::Table;
@@ -13,6 +15,32 @@ use rkyv::{
 #[doc(inline)]
 pub use crate::set_iters::ArchivedIter as Iter;
 
+/// A [`PortableSet`](crate::PortableSet) read in place, out of its serialized bytes.
+///
+/// Answers the same queries as the set it was archived from, with no deserialization and no
+/// copies: the minimal perfect hash function is part of the archive, so a lookup reads the
+/// buffer directly. Elements come back in their archived form, so a `u32` element is
+/// returned as an [`rkyv::rend::u32_le`].
+///
+/// Obtain one with [`rkyv::access`] over a buffer from
+/// [`rkyv::to_bytes`]. Validation checks the table's layout, so a
+/// corrupted archive is rejected rather than mis-read.
+///
+/// # Example
+///
+/// ```
+/// use icepop_phf::{PortableSet, set::rkyv::ArchivedSet};
+/// use rkyv::rancor::Error;
+///
+/// let set: PortableSet<u32> = [1u32, 2, 3].into_iter().collect();
+/// let bytes = rkyv::to_bytes::<Error>(&set)?;
+/// let archived = rkyv::access::<ArchivedSet<u32>, Error>(&bytes)?;
+///
+/// assert!(archived.contains(&2u32));
+/// assert!(!archived.contains(&9u32));
+/// assert_eq!(archived.len(), 3);
+/// # Ok::<(), Error>(())
+/// ```
 #[derive(rkyv::Portable, CheckBytes)]
 #[bytecheck(crate = rkyv::bytecheck)]
 #[repr(transparent)]
@@ -24,6 +52,8 @@ where
     table: Archived<Table<SetOps<T>, S, Portable>>,
 }
 
+/// Intermediate state produced while serializing a [`Set`], for
+/// [`Archive::resolve`].
 #[repr(transparent)]
 pub struct SetResolver<T, S = DefaultHasherSeed>
 where
@@ -85,32 +115,148 @@ where
     T: Archive,
     S: Archive,
 {
+    /// Returns the archived hasher the set was built with.
+    ///
+    /// The hasher travels inside the archive, which is what lets lookups reproduce the hashes
+    /// computed when the set was built, on any machine.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use icepop_phf::{DefaultHasherSeed, PortableSet, set::rkyv::ArchivedSet};
+    /// use rkyv::rancor::Error;
+    ///
+    /// let set = PortableSet::<u32>::builder_with_hasher(DefaultHasherSeed::with_seed(42)).build();
+    /// let bytes = rkyv::to_bytes::<Error>(&set)?;
+    /// let archived = rkyv::access::<ArchivedSet<u32>, Error>(&bytes)?;
+    ///
+    /// assert_eq!(archived.hasher().seed(), 42);
+    /// # Ok::<(), Error>(())
+    /// ```
     pub fn hasher(&self) -> &Archived<S> {
         self.table.hasher()
     }
 
+    /// Returns `true` if the archived set contains no elements.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use icepop_phf::{PortableSet, set::rkyv::ArchivedSet};
+    /// use rkyv::rancor::Error;
+    ///
+    /// let set = PortableSet::<u32>::builder().build();
+    /// let bytes = rkyv::to_bytes::<Error>(&set)?;
+    ///
+    /// assert!(rkyv::access::<ArchivedSet<u32>, Error>(&bytes)?.is_empty());
+    /// # Ok::<(), Error>(())
+    /// ```
     pub fn is_empty(&self) -> bool {
         self.table.is_empty()
     }
 
+    /// Returns the number of elements in the archived set.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use icepop_phf::{PortableSet, set::rkyv::ArchivedSet};
+    /// use rkyv::rancor::Error;
+    ///
+    /// let set: PortableSet<u32> = [1u32, 2, 3].into_iter().collect();
+    /// let bytes = rkyv::to_bytes::<Error>(&set)?;
+    ///
+    /// assert_eq!(rkyv::access::<ArchivedSet<u32>, Error>(&bytes)?.len(), 3);
+    /// # Ok::<(), Error>(())
+    /// ```
     pub fn len(&self) -> usize {
         self.table.len()
     }
 
+    /// Returns an iterator over the archived elements, in an arbitrary order.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use icepop_phf::{PortableSet, set::rkyv::ArchivedSet};
+    /// use rkyv::rancor::Error;
+    ///
+    /// let set: PortableSet<u32> = [1u32, 2, 3].into_iter().collect();
+    /// let bytes = rkyv::to_bytes::<Error>(&set)?;
+    /// let archived = rkyv::access::<ArchivedSet<u32>, Error>(&bytes)?;
+    ///
+    /// let mut elements: Vec<u32> = archived.iter().map(|e| e.to_native()).collect();
+    /// elements.sort();
+    /// assert_eq!(elements, [1, 2, 3]);
+    /// # Ok::<(), Error>(())
+    /// ```
     pub fn iter(&self) -> Iter<'_, T> {
         Iter {
             iter: self.table.iter(),
         }
     }
 
+    /// Borrows the archived elements as a contiguous slice, in an arbitrary order.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use icepop_phf::{PortableSet, set::rkyv::ArchivedSet};
+    /// use rkyv::rancor::Error;
+    ///
+    /// let set: PortableSet<u32> = [1u32, 2, 3].into_iter().collect();
+    /// let bytes = rkyv::to_bytes::<Error>(&set)?;
+    /// let archived = rkyv::access::<ArchivedSet<u32>, Error>(&bytes)?;
+    ///
+    /// assert_eq!(archived.as_slice().len(), 3);
+    /// # Ok::<(), Error>(())
+    /// ```
     pub fn as_slice(&self) -> &[Archived<T>] {
         self.table.as_slice()
     }
 
+    /// Returns the archived element at `index`, or `None` if it is out of bounds.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use icepop_phf::{PortableSet, set::rkyv::ArchivedSet};
+    /// use rkyv::rancor::Error;
+    ///
+    /// let set: PortableSet<u32> = [10u32, 20].into_iter().collect();
+    /// let bytes = rkyv::to_bytes::<Error>(&set)?;
+    /// let archived = rkyv::access::<ArchivedSet<u32>, Error>(&bytes)?;
+    /// let index = archived.get_index(&20u32).unwrap();
+    ///
+    /// assert_eq!(archived.index(index).map(|e| e.to_native()), Some(20));
+    /// assert!(archived.index(2).is_none());
+    /// # Ok::<(), Error>(())
+    /// ```
     pub fn index(&self, index: usize) -> Option<&Archived<T>> {
         self.table.index(index)
     }
 
+    /// Returns the archived element at `index` without a bounds check.
+    ///
+    /// # Safety
+    ///
+    /// `index` must be less than [`len`](Self::len).
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use icepop_phf::{PortableSet, set::rkyv::ArchivedSet};
+    /// use rkyv::rancor::Error;
+    ///
+    /// let set: PortableSet<u32> = [10u32, 20].into_iter().collect();
+    /// let bytes = rkyv::to_bytes::<Error>(&set)?;
+    /// let archived = rkyv::access::<ArchivedSet<u32>, Error>(&bytes)?;
+    /// let index = archived.get_index(&20u32).unwrap();
+    ///
+    /// // SAFETY: `get_index` returned this index, so it is in bounds.
+    /// assert_eq!(unsafe { archived.index_unchecked(index) }.to_native(), 20);
+    /// # Ok::<(), Error>(())
+    /// ```
     pub unsafe fn index_unchecked(&self, index: usize) -> &Archived<T> {
         unsafe { self.table.index_unchecked(index) }
     }
@@ -122,6 +268,31 @@ where
     S: Archive,
     Archived<S>: PortableBuildHasher,
 {
+    /// Returns the index `key` hashes to, without confirming that it is present.
+    ///
+    /// # Safety
+    ///
+    /// The archived set must not be empty.
+    ///
+    /// Looking up an element that is not present returns an arbitrary in-bounds index rather
+    /// than failing.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use icepop_phf::{PortableSet, set::rkyv::ArchivedSet};
+    /// use rkyv::rancor::Error;
+    ///
+    /// let set: PortableSet<u32> = [1u32, 2, 3].into_iter().collect();
+    /// let bytes = rkyv::to_bytes::<Error>(&set)?;
+    /// let archived = rkyv::access::<ArchivedSet<u32>, Error>(&bytes)?;
+    ///
+    /// // SAFETY: the archived set is not empty.
+    /// let index = unsafe { archived.get_index_unchecked(&2u32) };
+    ///
+    /// assert_eq!(archived.index(index).map(|e| e.to_native()), Some(2));
+    /// # Ok::<(), Error>(())
+    /// ```
     pub unsafe fn get_index_unchecked<Q>(&self, key: &Q) -> usize
     where
         Q: PortableHash + PortableEq<Archived<T>> + ?Sized,
@@ -129,6 +300,23 @@ where
         unsafe { self.table.get_index_unchecked(key) }
     }
 
+    /// Returns the index of the archived element equal to `key`, or `None` if there is none.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use icepop_phf::{PortableSet, set::rkyv::ArchivedSet};
+    /// use rkyv::rancor::Error;
+    ///
+    /// let set: PortableSet<u32> = [1u32, 2, 3].into_iter().collect();
+    /// let bytes = rkyv::to_bytes::<Error>(&set)?;
+    /// let archived = rkyv::access::<ArchivedSet<u32>, Error>(&bytes)?;
+    /// let index = archived.get_index(&2u32).unwrap();
+    ///
+    /// assert_eq!(archived.index(index).map(|e| e.to_native()), Some(2));
+    /// assert_eq!(archived.get_index(&9u32), None);
+    /// # Ok::<(), Error>(())
+    /// ```
     pub fn get_index<Q>(&self, key: &Q) -> Option<usize>
     where
         Q: PortableHash + PortableEq<Archived<T>> + ?Sized,
@@ -136,6 +324,25 @@ where
         self.table.get_index(key)
     }
 
+    /// Returns `true` if the archived set contains an element equal to `key`.
+    ///
+    /// The key is compared against the archived elements, so it need not itself be archived: a
+    /// `&str` looks up an archived `String`.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use icepop_phf::{PortableSet, set::rkyv::ArchivedSet};
+    /// use rkyv::rancor::Error;
+    ///
+    /// let set: PortableSet<String> = ["ash".to_string()].into_iter().collect();
+    /// let bytes = rkyv::to_bytes::<Error>(&set)?;
+    /// let archived = rkyv::access::<ArchivedSet<String>, Error>(&bytes)?;
+    ///
+    /// assert!(archived.contains("ash"));
+    /// assert!(!archived.contains("oak"));
+    /// # Ok::<(), Error>(())
+    /// ```
     pub fn contains<Q>(&self, key: &Q) -> bool
     where
         Q: PortableHash + PortableEq<Archived<T>> + ?Sized,
@@ -143,6 +350,22 @@ where
         self.table.contains(key)
     }
 
+    /// Returns the archived element equal to `key`, or `None` if there is none.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use icepop_phf::{PortableSet, set::rkyv::ArchivedSet};
+    /// use rkyv::rancor::Error;
+    ///
+    /// let set: PortableSet<String> = ["ash".to_string()].into_iter().collect();
+    /// let bytes = rkyv::to_bytes::<Error>(&set)?;
+    /// let archived = rkyv::access::<ArchivedSet<String>, Error>(&bytes)?;
+    ///
+    /// assert_eq!(archived.get("ash").map(|e| e.as_str()), Some("ash"));
+    /// assert!(archived.get("oak").is_none());
+    /// # Ok::<(), Error>(())
+    /// ```
     pub fn get<Q>(&self, key: &Q) -> Option<&Archived<T>>
     where
         Q: PortableHash + PortableEq<Archived<T>> + ?Sized,
@@ -150,6 +373,29 @@ where
         self.table.get(key)
     }
 
+    /// Returns the archived element `key` hashes to, without confirming that it is equal.
+    ///
+    /// # Safety
+    ///
+    /// The archived set must not be empty.
+    ///
+    /// Looking up an element that is not present returns an arbitrary element rather than
+    /// failing.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use icepop_phf::{PortableSet, set::rkyv::ArchivedSet};
+    /// use rkyv::rancor::Error;
+    ///
+    /// let set: PortableSet<u32> = [1u32, 2, 3].into_iter().collect();
+    /// let bytes = rkyv::to_bytes::<Error>(&set)?;
+    /// let archived = rkyv::access::<ArchivedSet<u32>, Error>(&bytes)?;
+    ///
+    /// // SAFETY: the archived set is not empty.
+    /// assert_eq!(unsafe { archived.get_unchecked(&2u32) }.to_native(), 2);
+    /// # Ok::<(), Error>(())
+    /// ```
     pub unsafe fn get_unchecked<Q>(&self, key: &Q) -> &Archived<T>
     where
         Q: PortableHash + PortableEq<Archived<T>> + ?Sized,
@@ -180,6 +426,32 @@ where
     fn into_iter(self) -> Self::IntoIter {
         self.iter()
     }
+}
+
+impl<T, S> PartialEq for ArchivedSet<T, S>
+where
+    T: Archive + PortableEq<Archived<T>>,
+    S: Archive,
+    Archived<T>: PortableHash + PortableEq + PartialEq,
+    Archived<S>: PortableBuildHasher,
+{
+    fn eq(&self, other: &Self) -> bool {
+        if self.len() != other.len() {
+            return false;
+        }
+
+        self.iter()
+            .all(|entry| other.get(entry).is_some_and(|other| other == entry))
+    }
+}
+
+impl<T, S> Eq for ArchivedSet<T, S>
+where
+    T: Archive + PortableEq<Archived<T>>,
+    S: Archive,
+    Archived<T>: PortableHash + PortableEq + Eq,
+    Archived<S>: PortableBuildHasher,
+{
 }
 
 #[cfg(feature = "serde")]
