@@ -1,3 +1,5 @@
+//! A portable hasher and its seed, built on rapidhash.
+
 use rapidhash::quality::{RapidHasher, SeedableState};
 
 use core::hash::{BuildHasher, Hasher};
@@ -5,6 +7,21 @@ use core::hash::{BuildHasher, Hasher};
 use crate::hash::PortableHash;
 use crate::hasher::PortableHasher;
 
+/// Seed for [`DefaultHasher`], and the [`BuildHasher`] that builds it.
+///
+/// Equal seeds build hashers that produce identical hashes on every platform, so a seed can be
+/// stored or sent to another machine to reproduce hashes there.
+///
+/// # Example
+///
+/// ```
+/// use portable::{DefaultHasherSeed, PortableBuildHasher};
+///
+/// let seed = DefaultHasherSeed::new();
+/// let same_seed = DefaultHasherSeed::with_seed(seed.seed());
+///
+/// assert_eq!(seed.portable_hash_one("hello"), same_seed.portable_hash_one("hello"));
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[cfg_attr(
     feature = "rkyv-0_8",
@@ -15,11 +32,51 @@ use crate::hasher::PortableHasher;
     rkyv(derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash))
 )]
 #[cfg_attr(feature = "rkyv-0_8", rkyv(crate = rkyv_0_8))]
+#[cfg_attr(
+    feature = "rkyv-0_8",
+    rkyv(attr(
+        doc = "The archived form of [`DefaultHasherSeed`], usable as a [`BuildHasher`] as is.",
+        doc = "",
+        doc = "Builds the same [`DefaultHasher`] as the seed it was archived from.",
+        doc = "",
+        doc = "# Example",
+        doc = "",
+        doc = "```",
+        doc = "use portable::{ArchivedDefaultHasherSeed, DefaultHasherSeed, PortableBuildHasher};",
+        doc = "",
+        doc = "let seed = DefaultHasherSeed::with_seed(42);",
+        doc = "let archived = ArchivedDefaultHasherSeed::with_seed(42);",
+        doc = "",
+        doc = "assert_eq!(seed.portable_hash_one(\"hello\"), archived.portable_hash_one(\"hello\"));",
+        doc = "```"
+    ))
+)]
 pub struct DefaultHasherSeed {
     #[cfg_attr(feature = "rkyv-0_8", rkyv(omit_bounds))]
     seed: u64,
 }
 
+/// A [`PortableHasher`] based on [rapidhash](https://docs.rs/rapidhash).
+///
+/// Built from a [`DefaultHasherSeed`]; hashers built from equal seeds produce identical hashes
+/// on every platform.
+///
+/// # Example
+///
+/// ```
+/// use core::hash::{BuildHasher, Hasher};
+/// use portable::{DefaultHasherSeed, PortableHash};
+///
+/// let seed = DefaultHasherSeed::with_seed(42);
+///
+/// let mut hasher = seed.build_hasher();
+/// "hello".portable_hash(&mut hasher);
+///
+/// let mut other = seed.build_hasher();
+/// "hello".portable_hash(&mut other);
+///
+/// assert_eq!(hasher.finish(), other.finish());
+/// ```
 #[derive(Clone)]
 pub struct DefaultHasher {
     hasher: RapidHasher<'static>,
@@ -142,6 +199,26 @@ impl Hasher for DefaultHasher {
 impl PortableHasher for DefaultHasher {}
 
 impl DefaultHasherSeed {
+    /// Creates a randomly generated seed.
+    ///
+    /// With the `getrandom` feature the randomness comes from the operating system, drawn once
+    /// per process and advanced for each later seed; otherwise it comes from a value generated
+    /// at compile time, which is the same for every run of the same binary.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the operating system's entropy source is unavailable (`getrandom` feature
+    /// only).
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use portable::{DefaultHasherSeed, PortableBuildHasher};
+    ///
+    /// let seed = DefaultHasherSeed::new();
+    ///
+    /// assert_eq!(seed.portable_hash_one("hello"), seed.portable_hash_one("hello"));
+    /// ```
     #[inline]
     pub fn new() -> Self {
         let secrets = rapidhash::v3::RapidSecrets {
@@ -154,11 +231,32 @@ impl DefaultHasherSeed {
         ))
     }
 
+    /// Creates a seed from an explicit value.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use portable::{DefaultHasherSeed, PortableBuildHasher};
+    ///
+    /// let seed = DefaultHasherSeed::with_seed(42);
+    /// let same_seed = DefaultHasherSeed::with_seed(42);
+    ///
+    /// assert_eq!(seed.portable_hash_one("hello"), same_seed.portable_hash_one("hello"));
+    /// ```
     #[inline]
     pub const fn with_seed(seed: u64) -> Self {
         Self { seed }
     }
 
+    /// Returns the seed value.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use portable::DefaultHasherSeed;
+    ///
+    /// assert_eq!(DefaultHasherSeed::with_seed(42).seed(), 42);
+    /// ```
     #[inline]
     pub const fn seed(&self) -> u64 {
         self.seed
@@ -300,6 +398,22 @@ impl<'de> serde::Deserialize<'de> for DefaultHasherSeed {
 
 #[cfg(feature = "rkyv-0_8")]
 impl ArchivedDefaultHasherSeed {
+    /// Creates a randomly generated seed, as [`DefaultHasherSeed::new`] does.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the operating system's entropy source is unavailable (`getrandom` feature
+    /// only).
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use portable::{ArchivedDefaultHasherSeed, PortableBuildHasher};
+    ///
+    /// let seed = ArchivedDefaultHasherSeed::new();
+    ///
+    /// assert_eq!(seed.portable_hash_one("hello"), seed.portable_hash_one("hello"));
+    /// ```
     #[inline]
     pub fn new() -> Self {
         Self {
@@ -307,6 +421,18 @@ impl ArchivedDefaultHasherSeed {
         }
     }
 
+    /// Creates a seed from an explicit value.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use portable::{ArchivedDefaultHasherSeed, DefaultHasherSeed, PortableBuildHasher};
+    ///
+    /// let archived = ArchivedDefaultHasherSeed::with_seed(42);
+    /// let seed = DefaultHasherSeed::with_seed(42);
+    ///
+    /// assert_eq!(archived.portable_hash_one("hello"), seed.portable_hash_one("hello"));
+    /// ```
     #[inline]
     pub const fn with_seed(seed: u64) -> Self {
         Self {
@@ -314,6 +440,15 @@ impl ArchivedDefaultHasherSeed {
         }
     }
 
+    /// Returns the seed value.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use portable::ArchivedDefaultHasherSeed;
+    ///
+    /// assert_eq!(ArchivedDefaultHasherSeed::with_seed(42).seed(), 42);
+    /// ```
     #[inline]
     pub const fn seed(&self) -> u64 {
         self.seed.to_native()

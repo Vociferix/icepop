@@ -31,8 +31,7 @@ bumpalo-3 = { version = "3", package = "bumpalo", default-features = false, opti
 either-1 = { version = "1", package = "either", default-features = false, optional = true }
 
 [features]
-default = ["std", "default-hasher", "getrandom"]
-std = ["alloc"]
+default = ["alloc", "default-hasher", "getrandom"]
 alloc = ["rkyv-0_8?/alloc", "tinyvec-1?/alloc", "bstr-1?/alloc", "ascii-1?/alloc"]
 default-hasher = ["dep:const-random", "dep:rapidhash"]
 getrandom = ["dep:getrandom"]
@@ -59,7 +58,7 @@ triomphe-0_1 = ["dep:triomphe-0_1"]
 # Feature to enable everything - This is for developer usage
 # and would typically not be useful for users.
 __all = [
-  "std",
+  "alloc",
   "default-hasher",
   "getrandom",
   "rkyv-0_8",

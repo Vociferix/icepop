@@ -1,10 +1,67 @@
+//! [`PortableEq`], the platform-independent counterpart of [`Eq`].
+
 use super::repr::{self, PortableRepr, VisitPortableRepr};
 
+/// Equality that gives the same answer on every platform, across types.
+///
+/// Blanket-implemented for every [`VisitPortableRepr`] type whose representation implements
+/// [`PortableReprEq`] for the other type's representation, so any two types sharing a
+/// representation compare with each other.
+///
+/// Implementations must uphold the contract with [`PortableHash`](crate::PortableHash): equal
+/// values must hash equally.
+///
+/// # Example
+///
+/// ```
+/// use portable::PortableEq;
+///
+/// let slice: &[u32] = &[1, 2, 3];
+///
+/// assert!(1usize.portable_eq(&1u64));
+/// assert!([1u32, 2, 3].portable_eq(slice));
+/// assert!(Some(1usize).portable_eq(&Some(1u64)));
+/// ```
 pub trait PortableEq<K: ?Sized = Self> {
+    /// Returns `true` if the two values are equal.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use portable::PortableEq;
+    ///
+    /// assert!(1usize.portable_eq(&1u64));
+    /// assert!(!1usize.portable_eq(&2u64));
+    /// ```
     fn portable_eq(&self, other: &K) -> bool;
 }
 
+/// Equality between two [portable representations](PortableRepr).
+///
+/// This is the trait to implement for a representation type; [`PortableEq`] on the types that
+/// share those representations follows from it. Implementing it for
+/// [`Infallible`](core::convert::Infallible) as well makes a representation comparable with
+/// representations that can never hold a value, such as the bounds of a `RangeFull`.
+///
+/// # Example
+///
+/// ```
+/// use portable::eq::PortableReprEq;
+///
+/// // `usize` compares against every width it may be stored as.
+/// assert!(1usize.portable_repr_eq(&1u64));
+/// ```
 pub trait PortableReprEq<K: PortableRepr + ?Sized = Self>: PortableRepr {
+    /// Returns `true` if the two representations are equal.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use portable::eq::PortableReprEq;
+    ///
+    /// assert!(1usize.portable_repr_eq(&1u64));
+    /// assert!(!1usize.portable_repr_eq(&2u64));
+    /// ```
     fn portable_repr_eq(&self, other: &K) -> bool;
 }
 
@@ -119,6 +176,8 @@ macro_rules! size_types {
     }
 }
 
+// A `usize` may be serialized as any fixed width, so it must compare against all of
+// them for results to be independent of the format that produced the value.
 size_types! {
     usize [u64] { u16, u32, u64 },
     isize [i64] { i16, i32, i64 },
@@ -143,45 +202,191 @@ where
     }
 }
 
-impl<T: ?Sized, U: ?Sized> PortableReprEq<repr::SequenceRepr<U>> for repr::SequenceRepr<T>
-where
-    for<'a> &'a T:
-        IntoIterator<Item: PortableEq<<&'a U as IntoIterator>::Item>, IntoIter: ExactSizeIterator>,
-    for<'a> &'a U: IntoIterator<IntoIter: ExactSizeIterator>,
-{
-    fn portable_repr_eq(&self, other: &repr::SequenceRepr<U>) -> bool {
-        self.len() == other.len() && self.iter().zip(other).all(|(l, r)| l.portable_eq(&r))
-    }
+#[cfg(feature = "alloc")]
+macro_rules! seq_eq {
+    ([$($lg:tt)*] $l:ty, [$($rg:tt)*] $r:ty) => {
+        impl<$($lg)*, $($rg)*> PortableReprEq<$r> for $l
+        where
+            T: PortableEq<U>,
+        {
+            fn portable_repr_eq(&self, other: &$r) -> bool {
+                self.len() == other.len()
+                    && self.iter().zip(other.iter()).all(|(l, r)| l.portable_eq(r))
+            }
+        }
+
+        impl<$($lg)*, U> PortableReprEq<[U]> for $l
+        where
+            T: PortableEq<U>,
+        {
+            fn portable_repr_eq(&self, other: &[U]) -> bool {
+                self.len() == other.len()
+                    && self.iter().zip(other.iter()).all(|(l, r)| l.portable_eq(r))
+            }
+        }
+
+        impl<$($rg)*, T> PortableReprEq<$r> for [T]
+        where
+            T: PortableEq<U>,
+        {
+            fn portable_repr_eq(&self, other: &$r) -> bool {
+                self.len() == other.len()
+                    && self.iter().zip(other.iter()).all(|(l, r)| l.portable_eq(r))
+            }
+        }
+
+        impl<$($lg)*> PortableReprEq<core::convert::Infallible> for $l
+        where
+            T: PortableEq,
+        {
+            fn portable_repr_eq(&self, other: &core::convert::Infallible) -> bool {
+                let _ = other;
+                true
+            }
+        }
+    };
 }
 
-impl<T: ?Sized> PortableReprEq<core::convert::Infallible> for repr::SequenceRepr<T>
-where
-    for<'a> &'a T: IntoIterator<Item: PortableEq, IntoIter: ExactSizeIterator>,
-{
-    fn portable_repr_eq(&self, other: &core::convert::Infallible) -> bool {
-        let _ = other;
-        true
-    }
+#[cfg(feature = "alloc")]
+macro_rules! map_eq {
+    ([$($lg:tt)*] $l:ty, [$($rg:tt)*] $r:ty) => {
+        impl<$($lg)*, $($rg)*> PortableReprEq<$r> for $l
+        where
+            K1: PortableEq<K2>,
+            V1: PortableEq<V2>,
+        {
+            fn portable_repr_eq(&self, other: &$r) -> bool {
+                self.len() == other.len()
+                    && self.iter().zip(other.iter()).all(|((lk, lv), (rk, rv))| {
+                        lk.portable_eq(rk) && lv.portable_eq(rv)
+                    })
+            }
+        }
+
+        impl<$($lg)*, K2, V2> PortableReprEq<[(K2, V2)]> for $l
+        where
+            K1: PortableEq<K2>,
+            V1: PortableEq<V2>,
+        {
+            fn portable_repr_eq(&self, other: &[(K2, V2)]) -> bool {
+                self.len() == other.len()
+                    && self.iter().zip(other.iter()).all(|((lk, lv), (rk, rv))| {
+                        lk.portable_eq(rk) && lv.portable_eq(rv)
+                    })
+            }
+        }
+
+        impl<$($rg)*, K1, V1> PortableReprEq<$r> for [(K1, V1)]
+        where
+            K1: PortableEq<K2>,
+            V1: PortableEq<V2>,
+        {
+            fn portable_repr_eq(&self, other: &$r) -> bool {
+                self.len() == other.len()
+                    && self.iter().zip(other.iter()).all(|((lk, lv), (rk, rv))| {
+                        lk.portable_eq(rk) && lv.portable_eq(rv)
+                    })
+            }
+        }
+
+        impl<$($lg)*> PortableReprEq<core::convert::Infallible> for $l
+        where
+            K1: PortableEq,
+            V1: PortableEq,
+        {
+            fn portable_repr_eq(&self, other: &core::convert::Infallible) -> bool {
+                let _ = other;
+                true
+            }
+        }
+    };
 }
 
-impl<T, U: ?Sized> PortableReprEq<repr::SequenceRepr<U>> for [T]
-where
-    for<'a> &'a T: PortableEq<<&'a U as IntoIterator>::Item>,
-    for<'a> &'a U: IntoIterator<IntoIter: ExactSizeIterator>,
-{
-    fn portable_repr_eq(&self, other: &repr::SequenceRepr<U>) -> bool {
-        self.len() == other.len() && self.iter().zip(other).all(|(l, r)| l.portable_eq(&r))
-    }
+cfg_select!(feature = "alloc" => {
+    seq_eq!([T] alloc::collections::BTreeSet<T>, [U] alloc::collections::BTreeSet<U>);
+    seq_eq!([T] alloc::collections::LinkedList<T>, [U] alloc::collections::LinkedList<U>);
+    seq_eq!([T] alloc::collections::VecDeque<T>, [U] alloc::collections::VecDeque<U>);
+    map_eq!(
+        [K1, V1] alloc::collections::BTreeMap<K1, V1>,
+        [K2, V2] alloc::collections::BTreeMap<K2, V2>
+    );
+} _ => {});
+
+#[cfg(all(feature = "rkyv-0_8", feature = "alloc"))]
+macro_rules! seq_eq_cross {
+    ([$($lg:tt)*] $l:ty, [$($rg:tt)*] $r:ty) => {
+        impl<$($lg)*, $($rg)*> PortableReprEq<$r> for $l
+        where
+            T: PortableEq<U>,
+        {
+            fn portable_repr_eq(&self, other: &$r) -> bool {
+                self.len() == other.len()
+                    && self.iter().zip(other.iter()).all(|(l, r)| l.portable_eq(r))
+            }
+        }
+
+        impl<$($lg)*, $($rg)*> PortableReprEq<$l> for $r
+        where
+            U: PortableEq<T>,
+        {
+            fn portable_repr_eq(&self, other: &$l) -> bool {
+                self.len() == other.len()
+                    && self.iter().zip(other.iter()).all(|(l, r)| l.portable_eq(r))
+            }
+        }
+    };
 }
 
-impl<T: ?Sized, U> PortableReprEq<[U]> for repr::SequenceRepr<T>
-where
-    for<'a> &'a T: IntoIterator<Item: PortableEq<&'a U>, IntoIter: ExactSizeIterator>,
-{
-    fn portable_repr_eq(&self, other: &[U]) -> bool {
-        self.len() == other.len() && self.iter().zip(other).all(|(l, r)| l.portable_eq(&r))
-    }
+#[cfg(all(feature = "rkyv-0_8", feature = "alloc"))]
+macro_rules! map_eq_cross {
+    ([$($lg:tt)*] $l:ty, [$($rg:tt)*] $r:ty) => {
+        impl<$($lg)*, $($rg)*> PortableReprEq<$r> for $l
+        where
+            K1: PortableEq<K2>,
+            V1: PortableEq<V2>,
+        {
+            fn portable_repr_eq(&self, other: &$r) -> bool {
+                self.len() == other.len()
+                    && self.iter().zip(other.iter()).all(|((lk, lv), (rk, rv))| {
+                        lk.portable_eq(rk) && lv.portable_eq(rv)
+                    })
+            }
+        }
+
+        impl<$($lg)*, $($rg)*> PortableReprEq<$l> for $r
+        where
+            K2: PortableEq<K1>,
+            V2: PortableEq<V1>,
+        {
+            fn portable_repr_eq(&self, other: &$l) -> bool {
+                self.len() == other.len()
+                    && self.iter().zip(other.iter()).all(|((lk, lv), (rk, rv))| {
+                        lk.portable_eq(rk) && lv.portable_eq(rv)
+                    })
+            }
+        }
+    };
 }
+
+cfg_select!(all(feature = "rkyv-0_8", feature = "alloc") => {
+    seq_eq!(
+        [T, const E: usize] rkyv_0_8::collections::btree_set::ArchivedBTreeSet<T, E>,
+        [U, const F: usize] rkyv_0_8::collections::btree_set::ArchivedBTreeSet<U, F>
+    );
+    map_eq!(
+        [K1, V1, const E: usize] rkyv_0_8::collections::btree_map::ArchivedBTreeMap<K1, V1, E>,
+        [K2, V2, const F: usize] rkyv_0_8::collections::btree_map::ArchivedBTreeMap<K2, V2, F>
+    );
+
+    seq_eq_cross!(
+        [T, const E: usize] rkyv_0_8::collections::btree_set::ArchivedBTreeSet<T, E>,
+        [U] alloc::collections::BTreeSet<U>
+    );
+    map_eq_cross!(
+        [K1, V1, const E: usize] rkyv_0_8::collections::btree_map::ArchivedBTreeMap<K1, V1, E>,
+        [K2, V2] alloc::collections::BTreeMap<K2, V2>
+    );
+} _ => {});
 
 macro_rules! tuple {
     ($r0:ident : ($t0:ident, $u0:ident $(,)?) $(, $rn:ident : ($tn:ident, $un:ident $(,)?))* $(,)?) => {

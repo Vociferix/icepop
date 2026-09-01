@@ -1,10 +1,66 @@
+//! Hasher traits guaranteeing platform-independent hash values.
+
 use core::hash::{BuildHasher, Hasher};
 
 use crate::hash::PortableHash;
 
+/// A [`Hasher`] whose output is identical on every platform.
+///
+/// Implementing this trait asserts that the hash depends only on the bytes written to the
+/// hasher, and not on endianness, pointer width, operating system, or process-local state such
+/// as a randomly generated seed. Hashers that do not satisfy this can still be used with
+/// [`PortableHash`], but their results are then only comparable within a single process.
+///
+/// # Example
+///
+/// ```
+/// use portable::{AssertPortable, PortableHash, PortableHasher};
+/// use std::hash::{DefaultHasher, Hasher};
+///
+/// fn hash_of<H: PortableHasher>(value: &impl PortableHash, mut state: H) -> u64 {
+///     value.portable_hash(&mut state);
+///     state.finish()
+/// }
+///
+/// // `AssertPortable` turns any hasher into a `PortableHasher`.
+/// assert_eq!(
+///     hash_of(&1usize, AssertPortable(DefaultHasher::new())),
+///     hash_of(&1u64, AssertPortable(DefaultHasher::new())),
+/// );
+/// ```
 pub trait PortableHasher: Hasher {}
 
+/// Portable hashing helpers for [`BuildHasher`]s that build a [`PortableHasher`].
+///
+/// Blanket-implemented for every such [`BuildHasher`]; it is never implemented manually.
+///
+/// # Example
+///
+/// ```
+/// use portable::{AssertPortable, PortableBuildHasher};
+/// use std::hash::RandomState;
+///
+/// let build_hasher = AssertPortable(RandomState::new());
+///
+/// assert_eq!(build_hasher.portable_hash_one(&1u32), build_hasher.portable_hash_one(&1u32));
+/// ```
 pub trait PortableBuildHasher: BuildHasher<Hasher: PortableHasher> {
+    /// Hashes one value with a freshly built hasher.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use portable::{AssertPortable, PortableBuildHasher};
+    /// use std::hash::RandomState;
+    ///
+    /// let build_hasher = AssertPortable(RandomState::new());
+    ///
+    /// // Equal values hash equally, even across types.
+    /// assert_eq!(
+    ///     build_hasher.portable_hash_one(&1usize),
+    ///     build_hasher.portable_hash_one(&1u64),
+    /// );
+    /// ```
     fn portable_hash_one<T>(&self, value: &T) -> u64
     where
         T: PortableHash + ?Sized,

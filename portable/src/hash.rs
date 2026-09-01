@@ -1,11 +1,85 @@
+//! [`PortableHash`], the platform-independent counterpart of [`Hash`](core::hash::Hash).
+
 use core::hash::Hasher;
 use core::ops::RangeBounds;
 
+/// A type that can be hashed identically on every platform.
+///
+/// Unlike [`Hash`](core::hash::Hash), implementations must write the same bytes regardless of
+/// target endianness or pointer width, so hashing a value with a
+/// [`PortableHasher`](crate::PortableHasher) yields the same hash everywhere. Each type
+/// implements this trait directly rather than through a shared representation, which leaves
+/// room for type-specific optimizations.
+///
+/// Implementations must uphold the contract with [`PortableEq`](crate::PortableEq): values
+/// that compare equal — including values of different types — must hash equally.
+///
+/// # Example
+///
+/// ```
+/// use portable::{AssertPortable, PortableBuildHasher, PortableHash};
+/// use std::hash::{Hasher, RandomState};
+///
+/// struct Point {
+///     x: i32,
+///     y: i32,
+/// }
+///
+/// impl PortableHash for Point {
+///     fn portable_hash<H: Hasher>(&self, state: &mut H) {
+///         self.x.portable_hash(state);
+///         self.y.portable_hash(state);
+///     }
+/// }
+///
+/// let build_hasher = AssertPortable(RandomState::new());
+///
+/// assert_eq!(
+///     build_hasher.portable_hash_one(&Point { x: 1, y: 2 }),
+///     build_hasher.portable_hash_one(&Point { x: 1, y: 2 }),
+/// );
+/// ```
 pub trait PortableHash {
+    /// Feeds this value into the given hasher.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use portable::{AssertPortable, PortableHash};
+    /// use std::hash::{DefaultHasher, Hasher};
+    ///
+    /// let mut state = AssertPortable(DefaultHasher::new());
+    /// "hello".portable_hash(&mut state);
+    ///
+    /// assert_ne!(state.finish(), 0);
+    /// ```
     fn portable_hash<H>(&self, state: &mut H)
     where
         H: Hasher;
 
+    /// Feeds a slice of values into the given hasher.
+    ///
+    /// Overriding this is an optimization only: it must hash the same bytes as calling
+    /// [`portable_hash`](PortableHash::portable_hash) on each element in turn. It does not
+    /// hash the length, so callers that need slices of different lengths to hash differently
+    /// must hash the length themselves.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use portable::{AssertPortable, PortableHash};
+    /// use std::hash::{DefaultHasher, Hasher};
+    ///
+    /// let mut slice_state = AssertPortable(DefaultHasher::new());
+    /// u32::portable_hash_slice(&[1, 2, 3], &mut slice_state);
+    ///
+    /// let mut item_state = AssertPortable(DefaultHasher::new());
+    /// for value in [1u32, 2, 3] {
+    ///     value.portable_hash(&mut item_state);
+    /// }
+    ///
+    /// assert_eq!(slice_state.finish(), item_state.finish());
+    /// ```
     fn portable_hash_slice<H>(slice: &[Self], state: &mut H)
     where
         Self: Sized,
@@ -30,6 +104,8 @@ where
     where
         H: Hasher,
     {
+        // SAFETY: `Portable<T>` is `repr(transparent)` over `T`, so `[Self]` has the
+        // same layout as `[T]`.
         T::portable_hash_slice(unsafe { &*(slice as *const [Self] as *const [T]) }, state);
     }
 }
@@ -65,13 +141,37 @@ where
     }
 }
 
+/// Views a value as its raw bytes.
+///
+/// The bytes are hashed exactly as they are laid out in memory, so callers are also responsible
+/// for only using this where that layout is the same on every platform.
+///
+/// # Safety
+///
+/// `T` must have no padding and no uninitialized bytes, since every byte of `val` is read.
+#[cfg(feature = "rend-0_5")]
 unsafe fn as_bytes<T>(val: &T) -> &[u8] {
+    // SAFETY: the caller guarantees that every byte of `val` is initialized. The returned slice
+    // borrows `val`, so the bytes stay valid and unmodified for its lifetime, and a value is
+    // never larger than `isize::MAX` bytes.
     unsafe {
         core::slice::from_raw_parts(val as *const T as *const u8, core::mem::size_of_val(val))
     }
 }
 
+/// Views a slice as its raw bytes.
+///
+/// The bytes are hashed exactly as they are laid out in memory, so callers are also responsible
+/// for only using this where that layout is the same on every platform.
+///
+/// # Safety
+///
+/// `T` must have no padding and no uninitialized bytes, since every byte of `slice` is read.
 unsafe fn slice_as_bytes<T>(slice: &[T]) -> &[u8] {
+    // SAFETY: the caller guarantees that every byte of every element is initialized, and array
+    // elements are laid out contiguously with no padding between them. The returned slice
+    // borrows `slice`, so the bytes stay valid and unmodified for its lifetime, and a slice is
+    // never larger than `isize::MAX` bytes.
     unsafe { core::slice::from_raw_parts(slice.as_ptr().cast(), core::mem::size_of_val(slice)) }
 }
 
@@ -111,6 +211,8 @@ impl PortableHash for bool {
     where
         H: Hasher,
     {
+        // SAFETY: `bool` occupies a single initialized byte with no padding, so every byte of the slice is
+        // initialized.
         state.write(unsafe { slice_as_bytes(slice) });
     }
 }
@@ -162,6 +264,8 @@ impl PortableHash for u64 {
     where
         H: Hasher,
     {
+        // SAFETY: `u64` has no padding, so every byte of the slice is
+        // initialized.
         state.write(unsafe { slice_as_bytes(slice) });
     }
 }
@@ -179,6 +283,8 @@ impl PortableHash for u128 {
     where
         H: Hasher,
     {
+        // SAFETY: `u128` has no padding, so every byte of the slice is
+        // initialized.
         state.write(unsafe { slice_as_bytes(slice) });
     }
 }
@@ -196,6 +302,8 @@ impl PortableHash for usize {
     where
         H: Hasher,
     {
+        // SAFETY: `usize` has no padding, so every byte of the slice is
+        // initialized.
         state.write(unsafe { slice_as_bytes(slice) });
     }
 }
@@ -212,6 +320,8 @@ impl PortableHash for i8 {
     where
         H: Hasher,
     {
+        // SAFETY: `i8` has no padding, so every byte of the slice is
+        // initialized.
         state.write(unsafe { slice_as_bytes(slice) });
     }
 }
@@ -247,6 +357,8 @@ impl PortableHash for i64 {
     where
         H: Hasher,
     {
+        // SAFETY: `i64` has no padding, so every byte of the slice is
+        // initialized.
         state.write(unsafe { slice_as_bytes(slice) });
     }
 }
@@ -264,6 +376,8 @@ impl PortableHash for i128 {
     where
         H: Hasher,
     {
+        // SAFETY: `i128` has no padding, so every byte of the slice is
+        // initialized.
         state.write(unsafe { slice_as_bytes(slice) });
     }
 }
@@ -281,6 +395,8 @@ impl PortableHash for isize {
     where
         H: Hasher,
     {
+        // SAFETY: `isize` has no padding, so every byte of the slice is
+        // initialized.
         state.write(unsafe { slice_as_bytes(slice) });
     }
 }
@@ -298,6 +414,8 @@ impl PortableHash for char {
     where
         H: Hasher,
     {
+        // SAFETY: `char` is four bytes wide with no padding, so every byte of the slice is
+        // initialized.
         state.write(unsafe { slice_as_bytes(slice) });
     }
 }
@@ -314,6 +432,8 @@ impl PortableHash for core::num::NonZeroU8 {
     where
         H: Hasher,
     {
+        // SAFETY: `NonZeroU8` has the same layout as `u8`, which has no padding, so every byte of the slice is
+        // initialized.
         state.write(unsafe { slice_as_bytes(slice) });
     }
 }
@@ -349,6 +469,8 @@ impl PortableHash for core::num::NonZeroU64 {
     where
         H: Hasher,
     {
+        // SAFETY: `NonZeroU64` has the same layout as `u64`, which has no padding, so every byte of the slice is
+        // initialized.
         state.write(unsafe { slice_as_bytes(slice) });
     }
 }
@@ -366,6 +488,8 @@ impl PortableHash for core::num::NonZeroU128 {
     where
         H: Hasher,
     {
+        // SAFETY: `NonZeroU128` has the same layout as `u128`, which has no padding, so every byte of the slice is
+        // initialized.
         state.write(unsafe { slice_as_bytes(slice) });
     }
 }
@@ -383,6 +507,8 @@ impl PortableHash for core::num::NonZeroUsize {
     where
         H: Hasher,
     {
+        // SAFETY: `NonZeroUsize` has the same layout as `usize`, which has no padding, so every byte of the slice is
+        // initialized.
         state.write(unsafe { slice_as_bytes(slice) });
     }
 }
@@ -399,6 +525,8 @@ impl PortableHash for core::num::NonZeroI8 {
     where
         H: Hasher,
     {
+        // SAFETY: `NonZeroI8` has the same layout as `i8`, which has no padding, so every byte of the slice is
+        // initialized.
         state.write(unsafe { slice_as_bytes(slice) });
     }
 }
@@ -434,6 +562,8 @@ impl PortableHash for core::num::NonZeroI64 {
     where
         H: Hasher,
     {
+        // SAFETY: `NonZeroI64` has the same layout as `i64`, which has no padding, so every byte of the slice is
+        // initialized.
         state.write(unsafe { slice_as_bytes(slice) });
     }
 }
@@ -451,6 +581,8 @@ impl PortableHash for core::num::NonZeroI128 {
     where
         H: Hasher,
     {
+        // SAFETY: `NonZeroI128` has the same layout as `i128`, which has no padding, so every byte of the slice is
+        // initialized.
         state.write(unsafe { slice_as_bytes(slice) });
     }
 }
@@ -468,6 +600,8 @@ impl PortableHash for core::num::NonZeroIsize {
     where
         H: Hasher,
     {
+        // SAFETY: `NonZeroIsize` has the same layout as `isize`, which has no padding, so every byte of the slice is
+        // initialized.
         state.write(unsafe { slice_as_bytes(slice) });
     }
 }
@@ -707,6 +841,8 @@ where
     where
         H: Hasher,
     {
+        // SAFETY: `Reverse<T>` is `repr(transparent)` over `T`, so `[Self]` has the
+        // same layout as `[T]`.
         T::portable_hash_slice(unsafe { &*(slice as *const [Self] as *const [T]) }, state);
     }
 }
@@ -726,6 +862,8 @@ where
     where
         H: Hasher,
     {
+        // SAFETY: `Saturating<T>` is `repr(transparent)` over `T`, so `[Self]` has the
+        // same layout as `[T]`.
         T::portable_hash_slice(unsafe { &*(slice as *const [Self] as *const [T]) }, state);
     }
 }
@@ -745,6 +883,8 @@ where
     where
         H: Hasher,
     {
+        // SAFETY: `Wrapping<T>` is `repr(transparent)` over `T`, so `[Self]` has the
+        // same layout as `[T]`.
         T::portable_hash_slice(unsafe { &*(slice as *const [Self] as *const [T]) }, state);
     }
 }
@@ -1225,6 +1365,8 @@ cfg_select!(feature = "rend-0_5" => {
         where
             H: Hasher,
         {
+            // SAFETY: `u64_le` is a `repr(C)` newtype over `u64` with equal size and alignment, so it has no padding, so every byte of the value is
+            // initialized.
             state.write(unsafe { as_bytes(self) })
         }
 
@@ -1232,6 +1374,8 @@ cfg_select!(feature = "rend-0_5" => {
         where
             H: Hasher,
         {
+            // SAFETY: `u64_le` is a `repr(C)` newtype over `u64` with equal size and alignment, so it has no padding, so every byte of the slice is
+            // initialized.
             state.write(unsafe { slice_as_bytes(slice) });
         }
     }
@@ -1250,6 +1394,8 @@ cfg_select!(feature = "rend-0_5" => {
         where
             H: Hasher,
         {
+            // SAFETY: `u128_le` is a `repr(C)` newtype over `u128` with equal size and alignment, so it has no padding, so every byte of the value is
+            // initialized.
             state.write(unsafe { as_bytes(self) });
         }
 
@@ -1257,6 +1403,8 @@ cfg_select!(feature = "rend-0_5" => {
         where
             H: Hasher,
         {
+            // SAFETY: `u128_le` is a `repr(C)` newtype over `u128` with equal size and alignment, so it has no padding, so every byte of the slice is
+            // initialized.
             state.write(unsafe { slice_as_bytes(slice) });
         }
     }
@@ -1311,6 +1459,8 @@ cfg_select!(feature = "rend-0_5" => {
         where
             H: Hasher,
         {
+            // SAFETY: `i64_le` is a `repr(C)` newtype over `i64` with equal size and alignment, so it has no padding, so every byte of the value is
+            // initialized.
             state.write(unsafe { as_bytes(self) });
         }
 
@@ -1318,6 +1468,8 @@ cfg_select!(feature = "rend-0_5" => {
         where
             H: Hasher,
         {
+            // SAFETY: `i64_le` is a `repr(C)` newtype over `i64` with equal size and alignment, so it has no padding, so every byte of the slice is
+            // initialized.
             state.write(unsafe { slice_as_bytes(slice) });
         }
     }
@@ -1336,6 +1488,8 @@ cfg_select!(feature = "rend-0_5" => {
         where
             H: Hasher,
         {
+            // SAFETY: `i128_le` is a `repr(C)` newtype over `i128` with equal size and alignment, so it has no padding, so every byte of the value is
+            // initialized.
             state.write(unsafe { as_bytes(self) });
         }
 
@@ -1343,6 +1497,8 @@ cfg_select!(feature = "rend-0_5" => {
         where
             H: Hasher,
         {
+            // SAFETY: `i128_le` is a `repr(C)` newtype over `i128` with equal size and alignment, so it has no padding, so every byte of the slice is
+            // initialized.
             state.write(unsafe { slice_as_bytes(slice) });
         }
     }
@@ -1361,6 +1517,8 @@ cfg_select!(feature = "rend-0_5" => {
         where
             H: Hasher,
         {
+            // SAFETY: `char_le` is a `repr(C)` newtype over `char` with equal size and alignment, so it has no padding, so every byte of the value is
+            // initialized.
             state.write(unsafe { as_bytes(self) });
         }
 
@@ -1368,6 +1526,8 @@ cfg_select!(feature = "rend-0_5" => {
         where
             H: Hasher,
         {
+            // SAFETY: `char_le` is a `repr(C)` newtype over `char` with equal size and alignment, so it has no padding, so every byte of the slice is
+            // initialized.
             state.write(unsafe { slice_as_bytes(slice) });
         }
     }
@@ -1422,6 +1582,8 @@ cfg_select!(feature = "rend-0_5" => {
         where
             H: Hasher,
         {
+            // SAFETY: `NonZeroU64_le` has the same layout as `u64_le`, which has no padding, so every byte of the value is
+            // initialized.
             state.write(unsafe { as_bytes(self) });
         }
 
@@ -1429,6 +1591,8 @@ cfg_select!(feature = "rend-0_5" => {
         where
             H: Hasher,
         {
+            // SAFETY: `NonZeroU64_le` has the same layout as `u64_le`, which has no padding, so every byte of the slice is
+            // initialized.
             state.write(unsafe { slice_as_bytes(slice) });
         }
     }
@@ -1447,6 +1611,8 @@ cfg_select!(feature = "rend-0_5" => {
         where
             H: Hasher,
         {
+            // SAFETY: `NonZeroU128_le` has the same layout as `u128_le`, which has no padding, so every byte of the value is
+            // initialized.
             state.write(unsafe { as_bytes(self) });
         }
 
@@ -1454,6 +1620,8 @@ cfg_select!(feature = "rend-0_5" => {
         where
             H: Hasher,
         {
+            // SAFETY: `NonZeroU128_le` has the same layout as `u128_le`, which has no padding, so every byte of the slice is
+            // initialized.
             state.write(unsafe { slice_as_bytes(slice) });
         }
     }
@@ -1508,6 +1676,8 @@ cfg_select!(feature = "rend-0_5" => {
         where
             H: Hasher,
         {
+            // SAFETY: `NonZeroI64_le` has the same layout as `i64_le`, which has no padding, so every byte of the value is
+            // initialized.
             state.write(unsafe { as_bytes(self) });
         }
 
@@ -1515,6 +1685,8 @@ cfg_select!(feature = "rend-0_5" => {
         where
             H: Hasher,
         {
+            // SAFETY: `NonZeroI64_le` has the same layout as `i64_le`, which has no padding, so every byte of the slice is
+            // initialized.
             state.write(unsafe { slice_as_bytes(slice) });
         }
     }
@@ -1533,6 +1705,8 @@ cfg_select!(feature = "rend-0_5" => {
         where
             H: Hasher,
         {
+            // SAFETY: `NonZeroI128_le` has the same layout as `i128_le`, which has no padding, so every byte of the value is
+            // initialized.
             state.write(unsafe { as_bytes(self) });
         }
 
@@ -1540,6 +1714,8 @@ cfg_select!(feature = "rend-0_5" => {
         where
             H: Hasher,
         {
+            // SAFETY: `NonZeroI128_le` has the same layout as `i128_le`, which has no padding, so every byte of the slice is
+            // initialized.
             state.write(unsafe { slice_as_bytes(slice) });
         }
     }
@@ -1579,6 +1755,7 @@ cfg_select!(feature = "rkyv-0_8" => {
         }
     }
 
+    #[cfg(feature = "alloc")]
     impl<T, const E: usize> PortableHash for rkyv_0_8::collections::btree_set::ArchivedBTreeSet<T, E>
     where
         T: PortableHash,
@@ -1587,10 +1764,12 @@ cfg_select!(feature = "rkyv-0_8" => {
         where
             H: Hasher,
         {
+            self.len().portable_hash(state);
             self.iter().for_each(|item| item.portable_hash(state));
         }
     }
 
+    #[cfg(feature = "alloc")]
     impl<K, V, const E: usize> PortableHash for rkyv_0_8::collections::btree_map::ArchivedBTreeMap<K, V, E>
     where
         K: PortableHash,
@@ -1600,6 +1779,7 @@ cfg_select!(feature = "rkyv-0_8" => {
         where
             H: Hasher,
         {
+            self.len().portable_hash(state);
             self.iter().for_each(|entry| entry.portable_hash(state));
         }
     }

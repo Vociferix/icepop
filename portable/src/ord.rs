@@ -1,13 +1,69 @@
+//! [`PortableOrd`], the platform-independent counterpart of [`Ord`].
+
 use super::eq::{PortableEq, PortableReprEq};
 use super::repr::{self, PortableRepr, VisitPortableRepr};
 
 use core::cmp::Ordering;
 
+/// Ordering that gives the same answer on every platform, across types.
+///
+/// Blanket-implemented for every [`VisitPortableRepr`] type whose representation implements
+/// [`PortableReprOrd`] for the other type's representation, so any two types sharing a
+/// representation can be ordered against each other.
+///
+/// # Example
+///
+/// ```
+/// use portable::PortableOrd;
+///
+/// let slice: &[u32] = &[1, 2];
+///
+/// assert!(2usize.portable_cmp(&10u64).is_lt());
+/// assert!([1u32, 2, 3].portable_cmp(slice).is_gt());
+/// assert!(Some(1usize).portable_cmp(&None::<u64>).is_gt());
+/// ```
 pub trait PortableOrd<K: ?Sized = Self>: PortableEq<K> {
+    /// Returns the ordering of this value relative to `other`.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use core::cmp::Ordering;
+    /// use portable::PortableOrd;
+    ///
+    /// assert_eq!(2usize.portable_cmp(&10u64), Ordering::Less);
+    /// assert_eq!(2usize.portable_cmp(&2u64), Ordering::Equal);
+    /// ```
     fn portable_cmp(&self, other: &K) -> Ordering;
 }
 
+/// Ordering between two [portable representations](PortableRepr).
+///
+/// This is the trait to implement for a representation type; [`PortableOrd`] on the types that
+/// share those representations follows from it. Implementing it for
+/// [`Infallible`](core::convert::Infallible) as well makes a representation orderable against
+/// representations that can never hold a value, such as the bounds of a `RangeFull`.
+///
+/// # Example
+///
+/// ```
+/// use portable::ord::PortableReprOrd;
+///
+/// // `usize` orders against every width it may be stored as.
+/// assert!(2usize.portable_repr_cmp(&10u64).is_lt());
+/// ```
 pub trait PortableReprOrd<K: PortableRepr + ?Sized = Self>: PortableReprEq<K> {
+    /// Returns the ordering of this representation relative to `other`.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use core::cmp::Ordering;
+    /// use portable::ord::PortableReprOrd;
+    ///
+    /// assert_eq!(2usize.portable_repr_cmp(&10u64), Ordering::Less);
+    /// assert_eq!(2usize.portable_repr_cmp(&2u64), Ordering::Equal);
+    /// ```
     fn portable_repr_cmp(&self, other: &K) -> Ordering;
 }
 
@@ -131,6 +187,8 @@ macro_rules! size_types {
     }
 }
 
+// A `usize` may be serialized as any fixed width, so it must compare against all of
+// them for results to be independent of the format that produced the value.
 size_types! {
     usize [u64] { u16, u32, u64 },
     isize [i64] { i16, i32, i64 },
@@ -167,81 +225,218 @@ where
     }
 }
 
-impl<T, U> PortableReprOrd<repr::SequenceRepr<U>> for repr::SequenceRepr<T>
-where
-    for<'a> &'a T:
-        IntoIterator<Item: PortableOrd<<&'a U as IntoIterator>::Item>, IntoIter: ExactSizeIterator>,
-    for<'a> &'a U: IntoIterator<IntoIter: ExactSizeIterator>,
-{
-    fn portable_repr_cmp(&self, other: &repr::SequenceRepr<U>) -> Ordering {
-        let mut l = self.iter();
-        let mut r = other.iter();
-        loop {
-            match (l.next(), r.next()) {
-                (Some(l), Some(r)) => match l.portable_cmp(&r) {
-                    Ordering::Equal => {}
-                    ord => return ord,
-                },
-                (None, None) => return Ordering::Equal,
-                (Some(_), None) => return Ordering::Greater,
-                (None, Some(_)) => return Ordering::Less,
+#[cfg(feature = "alloc")]
+macro_rules! seq_cmp {
+    ([$($lg:tt)*] $l:ty, [$($rg:tt)*] $r:ty) => {
+        impl<$($lg)*, $($rg)*> PortableReprOrd<$r> for $l
+        where
+            T: PortableOrd<U>,
+        {
+            fn portable_repr_cmp(&self, other: &$r) -> Ordering {
+                seq_cmp(self.iter(), other.iter())
             }
+        }
+
+        impl<$($lg)*, U> PortableReprOrd<[U]> for $l
+        where
+            T: PortableOrd<U>,
+        {
+            fn portable_repr_cmp(&self, other: &[U]) -> Ordering {
+                seq_cmp(self.iter(), other.iter())
+            }
+        }
+
+        impl<$($rg)*, T> PortableReprOrd<$r> for [T]
+        where
+            T: PortableOrd<U>,
+        {
+            fn portable_repr_cmp(&self, other: &$r) -> Ordering {
+                seq_cmp(self.iter(), other.iter())
+            }
+        }
+
+        impl<$($lg)*> PortableReprOrd<core::convert::Infallible> for $l
+        where
+            T: PortableOrd,
+        {
+            fn portable_repr_cmp(&self, other: &core::convert::Infallible) -> Ordering {
+                let _ = other;
+                Ordering::Equal
+            }
+        }
+    };
+}
+
+#[cfg(feature = "alloc")]
+macro_rules! map_cmp {
+    ([$($lg:tt)*] $l:ty, [$($rg:tt)*] $r:ty) => {
+        impl<$($lg)*, $($rg)*> PortableReprOrd<$r> for $l
+        where
+            K1: PortableOrd<K2>,
+            V1: PortableOrd<V2>,
+        {
+            fn portable_repr_cmp(&self, other: &$r) -> Ordering {
+                map_cmp(self.iter(), other.iter())
+            }
+        }
+
+        impl<$($lg)*, K2, V2> PortableReprOrd<[(K2, V2)]> for $l
+        where
+            K1: PortableOrd<K2>,
+            V1: PortableOrd<V2>,
+        {
+            fn portable_repr_cmp(&self, other: &[(K2, V2)]) -> Ordering {
+                map_cmp(self.iter(), other.iter().map(|(k, v)| (k, v)))
+            }
+        }
+
+        impl<$($rg)*, K1, V1> PortableReprOrd<$r> for [(K1, V1)]
+        where
+            K1: PortableOrd<K2>,
+            V1: PortableOrd<V2>,
+        {
+            fn portable_repr_cmp(&self, other: &$r) -> Ordering {
+                map_cmp(self.iter().map(|(k, v)| (k, v)), other.iter())
+            }
+        }
+
+        impl<$($lg)*> PortableReprOrd<core::convert::Infallible> for $l
+        where
+            K1: PortableOrd,
+            V1: PortableOrd,
+        {
+            fn portable_repr_cmp(&self, other: &core::convert::Infallible) -> Ordering {
+                let _ = other;
+                Ordering::Equal
+            }
+        }
+    };
+}
+
+#[cfg(feature = "alloc")]
+fn seq_cmp<'l, 'r, L, R, T, U>(mut left: L, mut right: R) -> Ordering
+where
+    L: Iterator<Item = &'l T>,
+    R: Iterator<Item = &'r U>,
+    T: PortableOrd<U> + 'l,
+    U: 'r,
+{
+    loop {
+        match (left.next(), right.next()) {
+            (Some(l), Some(r)) => match l.portable_cmp(r) {
+                Ordering::Equal => {}
+                ord => return ord,
+            },
+            (None, None) => return Ordering::Equal,
+            (Some(_), None) => return Ordering::Greater,
+            (None, Some(_)) => return Ordering::Less,
         }
     }
 }
 
-impl<T> PortableReprOrd<core::convert::Infallible> for repr::SequenceRepr<T>
+#[cfg(feature = "alloc")]
+fn map_cmp<'l, 'r, L, R, K1, V1, K2, V2>(mut left: L, mut right: R) -> Ordering
 where
-    for<'a> &'a T: IntoIterator<Item: PortableOrd, IntoIter: ExactSizeIterator>,
+    L: Iterator<Item = (&'l K1, &'l V1)>,
+    R: Iterator<Item = (&'r K2, &'r V2)>,
+    K1: PortableOrd<K2> + 'l,
+    V1: PortableOrd<V2> + 'l,
+    K2: 'r,
+    V2: 'r,
 {
-    fn portable_repr_cmp(&self, other: &core::convert::Infallible) -> Ordering {
-        let _ = other;
-        Ordering::Equal
-    }
-}
-
-impl<T, U> PortableReprOrd<repr::SequenceRepr<U>> for [T]
-where
-    for<'a> &'a T: PortableOrd<<&'a U as IntoIterator>::Item>,
-    for<'a> &'a U: IntoIterator<IntoIter: ExactSizeIterator>,
-{
-    fn portable_repr_cmp(&self, other: &repr::SequenceRepr<U>) -> Ordering {
-        let mut l = self.iter();
-        let mut r = other.iter();
-        loop {
-            match (l.next(), r.next()) {
-                (Some(l), Some(r)) => match l.portable_cmp(&r) {
+    loop {
+        match (left.next(), right.next()) {
+            (Some((lk, lv)), Some((rk, rv))) => match lk.portable_cmp(rk) {
+                Ordering::Equal => match lv.portable_cmp(rv) {
                     Ordering::Equal => {}
                     ord => return ord,
                 },
-                (None, None) => return Ordering::Equal,
-                (Some(_), None) => return Ordering::Greater,
-                (None, Some(_)) => return Ordering::Less,
-            }
+                ord => return ord,
+            },
+            (None, None) => return Ordering::Equal,
+            (Some(_), None) => return Ordering::Greater,
+            (None, Some(_)) => return Ordering::Less,
         }
     }
 }
 
-impl<T: ?Sized, U> PortableReprOrd<[U]> for repr::SequenceRepr<T>
-where
-    for<'a> &'a T: IntoIterator<Item: PortableOrd<&'a U>, IntoIter: ExactSizeIterator>,
-{
-    fn portable_repr_cmp(&self, other: &[U]) -> Ordering {
-        let mut l = self.iter();
-        let mut r = other.iter();
-        loop {
-            match (l.next(), r.next()) {
-                (Some(l), Some(r)) => match l.portable_cmp(&r) {
-                    Ordering::Equal => {}
-                    ord => return ord,
-                },
-                (None, None) => return Ordering::Equal,
-                (Some(_), None) => return Ordering::Greater,
-                (None, Some(_)) => return Ordering::Less,
+cfg_select!(feature = "alloc" => {
+    seq_cmp!([T] alloc::collections::BTreeSet<T>, [U] alloc::collections::BTreeSet<U>);
+    seq_cmp!([T] alloc::collections::LinkedList<T>, [U] alloc::collections::LinkedList<U>);
+    seq_cmp!([T] alloc::collections::VecDeque<T>, [U] alloc::collections::VecDeque<U>);
+    map_cmp!(
+        [K1, V1] alloc::collections::BTreeMap<K1, V1>,
+        [K2, V2] alloc::collections::BTreeMap<K2, V2>
+    );
+} _ => {});
+
+#[cfg(all(feature = "rkyv-0_8", feature = "alloc"))]
+macro_rules! seq_cmp_cross {
+    ([$($lg:tt)*] $l:ty, [$($rg:tt)*] $r:ty) => {
+        impl<$($lg)*, $($rg)*> PortableReprOrd<$r> for $l
+        where
+            T: PortableOrd<U>,
+        {
+            fn portable_repr_cmp(&self, other: &$r) -> Ordering {
+                seq_cmp(self.iter(), other.iter())
             }
         }
-    }
+
+        impl<$($lg)*, $($rg)*> PortableReprOrd<$l> for $r
+        where
+            U: PortableOrd<T>,
+        {
+            fn portable_repr_cmp(&self, other: &$l) -> Ordering {
+                seq_cmp(self.iter(), other.iter())
+            }
+        }
+    };
 }
+
+#[cfg(all(feature = "rkyv-0_8", feature = "alloc"))]
+macro_rules! map_cmp_cross {
+    ([$($lg:tt)*] $l:ty, [$($rg:tt)*] $r:ty) => {
+        impl<$($lg)*, $($rg)*> PortableReprOrd<$r> for $l
+        where
+            K1: PortableOrd<K2>,
+            V1: PortableOrd<V2>,
+        {
+            fn portable_repr_cmp(&self, other: &$r) -> Ordering {
+                map_cmp(self.iter(), other.iter())
+            }
+        }
+
+        impl<$($lg)*, $($rg)*> PortableReprOrd<$l> for $r
+        where
+            K2: PortableOrd<K1>,
+            V2: PortableOrd<V1>,
+        {
+            fn portable_repr_cmp(&self, other: &$l) -> Ordering {
+                map_cmp(self.iter(), other.iter())
+            }
+        }
+    };
+}
+
+cfg_select!(all(feature = "rkyv-0_8", feature = "alloc") => {
+    seq_cmp!(
+        [T, const E: usize] rkyv_0_8::collections::btree_set::ArchivedBTreeSet<T, E>,
+        [U, const F: usize] rkyv_0_8::collections::btree_set::ArchivedBTreeSet<U, F>
+    );
+    map_cmp!(
+        [K1, V1, const E: usize] rkyv_0_8::collections::btree_map::ArchivedBTreeMap<K1, V1, E>,
+        [K2, V2, const F: usize] rkyv_0_8::collections::btree_map::ArchivedBTreeMap<K2, V2, F>
+    );
+
+    seq_cmp_cross!(
+        [T, const E: usize] rkyv_0_8::collections::btree_set::ArchivedBTreeSet<T, E>,
+        [U] alloc::collections::BTreeSet<U>
+    );
+    map_cmp_cross!(
+        [K1, V1, const E: usize] rkyv_0_8::collections::btree_map::ArchivedBTreeMap<K1, V1, E>,
+        [K2, V2] alloc::collections::BTreeMap<K2, V2>
+    );
+} _ => {});
 
 macro_rules! tuple {
     ($r0:ident : ($t0:ident, $u0:ident $(,)?) $(, $rn:ident : ($tn:ident, $un:ident $(,)?))* $(,)?) => {

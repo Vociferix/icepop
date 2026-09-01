@@ -1,15 +1,63 @@
+//! Portable representations: the canonical forms that comparisons are performed on.
+//!
+//! A type's representation is the form it shares with every other type that should compare as
+//! the same value. `u32`, a little-endian `u32` and `NonZeroU32` are all represented as `u32`;
+//! `[T; N]`, `Vec<T>` and `Box<[T]>` are all represented as `[T]`. Types that cannot hand out
+//! a plain reference to their representation — `Option`, `Result`, tuples, ranges — are
+//! represented by the borrowed view types defined here. Collections that are neither a slice
+//! nor viewable as one, such as `BTreeMap` and `VecDeque`, represent themselves and compare
+//! element-wise against slices and against collections of their own kind.
+
 use super::Portable;
 
 use core::ptr::NonNull;
 
+/// Names a type's portable representation and lends out a view of it.
+///
+/// Implementing this trait is all a type needs in order to gain
+/// [`PortableEq`](crate::PortableEq) and [`PortableOrd`](crate::PortableOrd), and to compare
+/// against every other type sharing its representation. The representation is passed to a
+/// callback rather than returned, so it may be a temporary — the `u32` decoded from a
+/// little-endian `u32`, or a view type such as [`OptionRepr`].
+///
+/// # Example
+///
+/// ```
+/// use portable::repr::VisitPortableRepr;
+///
+/// // An array is represented as a slice.
+/// let len = [1u32, 2, 3].visit_portable_repr(|repr| repr.len());
+///
+/// assert_eq!(len, 3);
+/// ```
 pub trait VisitPortableRepr {
+    /// The canonical form this type is compared as.
     type Repr: PortableRepr + ?Sized;
 
+    /// Calls `f` with a view of this value's portable representation.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use portable::repr::VisitPortableRepr;
+    ///
+    /// // A `NonZeroU32` is represented as a `u32`.
+    /// let doubled = core::num::NonZeroU32::new(21)
+    ///     .unwrap()
+    ///     .visit_portable_repr(|repr| repr * 2);
+    ///
+    /// assert_eq!(doubled, 42);
+    /// ```
     fn visit_portable_repr<F, R>(&self, f: F) -> R
     where
         F: FnOnce(&Self::Repr) -> R;
 }
 
+/// A type that is its own portable representation.
+///
+/// Blanket-implemented for every [`VisitPortableRepr`] type whose
+/// [`Repr`](VisitPortableRepr::Repr) is itself, so it is never implemented manually. Bounds on
+/// representations use it to require that the representation bottoms out.
 pub trait PortableRepr: VisitPortableRepr<Repr = Self> {}
 
 impl<T> PortableRepr for T where T: VisitPortableRepr<Repr = Self> + ?Sized {}
@@ -211,9 +259,14 @@ macro_rules! tuple {
         tuple! { { $n0 [$($r0)?] $($t)* $t0 } { $(($nn $tn $($rn)?))* } }
     };
     ({ $n:ident [$($r:ident)?] $($t:ident)* } { }) => {
+        /// Portable representation of a tuple, holding a borrowed view of each element.
+        ///
+        /// Tuples are represented by the type of matching arity, `Tuple1Repr` through
+        /// `Tuple16Repr`, and are compared element by element.
         pub struct $n<$($t: ?Sized),*>($(NonNull<$t>),*);
 
         impl<$($t: ?Sized),*> $n<$($t),*> {
+            /// Calls `f` with the representation of a tuple of references.
             pub fn visit<F, R>(tuple: ($(&$t,)*), f: F) -> R
             where
                 F: FnOnce(&Self) -> R,
@@ -232,11 +285,15 @@ macro_rules! tuple {
                 visit(tuple, f)
             }
 
+            /// Returns the represented elements as a tuple of references.
             pub fn as_ref(&self) -> ($(&$t,)*) {
                 #[allow(non_snake_case)]
                 fn make_ref<$($t: ?Sized),*>(
                     $n($($t),*): &$n<$($t),*>,
                 ) -> ($(&$t,)*) {
+                    // SAFETY: the pointers are only ever set by `visit`, from references that
+                    // outlive the call it lends `Self` out for, and the returned borrows are
+                    // tied to `&self`, so they cannot outlive those references.
                     unsafe {
                         ($($t.as_ref(),)*)
                     }
@@ -360,9 +417,34 @@ map_repr!([P: core::ops::Deref<Target: VisitPortableRepr>] |val: &core::pin::Pin
 self_repr!(core::task::Poll<T>);
 self_repr!(core::time::Duration);
 
+/// Portable representation of optional values, holding a borrowed view of the contained value.
+///
+/// Shared by every optional type — `Option<T>` and its niched and archived counterparts — so
+/// they compare with each other. A `None` sorts before any `Some`.
+///
+/// # Example
+///
+/// ```
+/// use portable::repr::{OptionRepr, VisitPortableRepr};
+///
+/// let doubled = Some(21u32).visit_portable_repr(|repr| repr.as_ref().map(|v| v * 2));
+///
+/// assert_eq!(doubled, Some(42));
+/// ```
 pub struct OptionRepr<T: ?Sized>(Option<NonNull<T>>);
 
 impl<T: ?Sized> OptionRepr<T> {
+    /// Calls `f` with the representation of an optional reference.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use portable::repr::OptionRepr;
+    ///
+    /// let is_some = OptionRepr::visit(Some(&1u32), |repr| repr.as_ref().is_some());
+    ///
+    /// assert!(is_some);
+    /// ```
     pub fn visit<F, R>(opt: Option<&T>, f: F) -> R
     where
         F: FnOnce(&Self) -> R,
@@ -370,7 +452,21 @@ impl<T: ?Sized> OptionRepr<T> {
         f(&Self(opt.map(NonNull::from_ref)))
     }
 
+    /// Returns the represented value as an optional reference.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use portable::repr::OptionRepr;
+    ///
+    /// let value = OptionRepr::visit(Some(&1u32), |repr| repr.as_ref().copied());
+    ///
+    /// assert_eq!(value, Some(1));
+    /// ```
     pub fn as_ref(&self) -> Option<&T> {
+        // SAFETY: the pointer is only ever set by `visit`, from a reference that outlives the
+        // call it lends `Self` out for, and the returned borrow is tied to `&self`, so it
+        // cannot outlive that reference.
         unsafe { self.0.map(|ptr| ptr.as_ref()) }
     }
 }
@@ -388,9 +484,36 @@ impl<T> VisitPortableRepr for Option<T> {
     }
 }
 
+/// Portable representation of fallible values, holding a borrowed view of the contained value.
+///
+/// Shared by `Result<T, E>` and its archived counterparts, so they compare with each other. An
+/// `Ok` sorts before any `Err`.
+///
+/// # Example
+///
+/// ```
+/// use portable::repr::{ResultRepr, VisitPortableRepr};
+///
+/// let value: Result<u32, ()> = Ok(21);
+/// let doubled = value.visit_portable_repr(|repr| repr.as_ref().map(|v| v * 2).map_err(|_| ()));
+///
+/// assert_eq!(doubled, Ok(42));
+/// ```
 pub struct ResultRepr<T: ?Sized, E: ?Sized>(Result<NonNull<T>, NonNull<E>>);
 
 impl<T: ?Sized, E: ?Sized> ResultRepr<T, E> {
+    /// Calls `f` with the representation of a result of references.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use portable::repr::ResultRepr;
+    ///
+    /// let result: Result<&u32, &()> = Ok(&1);
+    /// let is_ok = ResultRepr::visit(result, |repr| repr.as_ref().is_ok());
+    ///
+    /// assert!(is_ok);
+    /// ```
     pub fn visit<F, R>(res: Result<&T, &E>, f: F) -> R
     where
         F: FnOnce(&Self) -> R,
@@ -398,7 +521,22 @@ impl<T: ?Sized, E: ?Sized> ResultRepr<T, E> {
         f(&Self(res.map(NonNull::from_ref).map_err(NonNull::from_ref)))
     }
 
+    /// Returns the represented value as a result of references.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use portable::repr::ResultRepr;
+    ///
+    /// let result: Result<&u32, &()> = Ok(&1);
+    /// let value = ResultRepr::visit(result, |repr| repr.as_ref().ok().copied());
+    ///
+    /// assert_eq!(value, Some(1));
+    /// ```
     pub fn as_ref(&self) -> Result<&T, &E> {
+        // SAFETY: the pointer is only ever set by `visit`, from a reference that outlives the
+        // call it lends `Self` out for, and the returned borrow is tied to `&self`, so it
+        // cannot outlive that reference.
         unsafe { self.0.map(|ptr| ptr.as_ref()).map_err(|ptr| ptr.as_ref()) }
     }
 }
@@ -416,9 +554,36 @@ impl<T, E> VisitPortableRepr for Result<T, E> {
     }
 }
 
+/// Portable representation of a range bound, holding a borrowed view of the bound value.
+///
+/// # Example
+///
+/// ```
+/// use core::ops::Bound;
+/// use portable::repr::{BoundRepr, VisitPortableRepr};
+///
+/// let bound = Bound::Included(1u32);
+/// let value = bound.visit_portable_repr(|repr| repr.as_ref().cloned());
+///
+/// assert_eq!(value, Bound::Included(1));
+/// ```
 pub struct BoundRepr<T: ?Sized>(core::ops::Bound<NonNull<T>>);
 
 impl<T: ?Sized> BoundRepr<T> {
+    /// Calls `f` with the representation of a bound holding a reference.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use core::ops::Bound;
+    /// use portable::repr::BoundRepr;
+    ///
+    /// let is_unbounded = BoundRepr::visit(Bound::Included(&1u32), |repr| {
+    ///     matches!(repr.as_ref(), Bound::Unbounded)
+    /// });
+    ///
+    /// assert!(!is_unbounded);
+    /// ```
     pub fn visit<F, R>(bound: core::ops::Bound<&T>, f: F) -> R
     where
         F: FnOnce(&Self) -> R,
@@ -426,7 +591,22 @@ impl<T: ?Sized> BoundRepr<T> {
         f(&Self(bound.map(NonNull::from_ref)))
     }
 
+    /// Returns the represented bound with a reference to its value.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use core::ops::Bound;
+    /// use portable::repr::BoundRepr;
+    ///
+    /// let bound = BoundRepr::visit(Bound::Included(&1u32), |repr| repr.as_ref().cloned());
+    ///
+    /// assert_eq!(bound, Bound::Included(1));
+    /// ```
     pub fn as_ref(&self) -> core::ops::Bound<&T> {
+        // SAFETY: the pointer is only ever set by `visit`, from a reference that outlives the
+        // call it lends `Self` out for, and the returned borrow is tied to `&self`, so it
+        // cannot outlive that reference.
         unsafe { self.0.map(|ptr| ptr.as_ref()) }
     }
 }
@@ -444,6 +624,25 @@ impl<T> VisitPortableRepr for core::ops::Bound<T> {
     }
 }
 
+/// Portable representation of ranges: their start and end [`BoundRepr`]s as a pair.
+///
+/// Every range type shares this representation and so compares against the others;
+/// `RangeFull`, which has no bound values, is represented as
+/// `RangeRepr<Infallible>`.
+///
+/// # Example
+///
+/// ```
+/// use core::ops::Bound;
+/// use portable::repr::{RangeRepr, VisitPortableRepr};
+///
+/// (1u32..3).visit_portable_repr(|repr: &RangeRepr<u32>| {
+///     let (start, end) = repr.as_ref();
+///
+///     assert_eq!(start.as_ref(), Bound::Included(&1));
+///     assert_eq!(end.as_ref(), Bound::Excluded(&3));
+/// });
+/// ```
 pub type RangeRepr<T> = Tuple2Repr<BoundRepr<T>, BoundRepr<T>>;
 
 fn visit_range_repr<T, R, F, O>(range: &R, f: F) -> O
@@ -500,107 +699,6 @@ impl VisitPortableRepr for core::ops::RangeFull {
     }
 }
 
-pub trait Sequence {
-    type Item: Sized;
-
-    type Iter<'a>: Iterator
-    where
-        Self: 'a,
-        Self::Item: 'a;
-
-    fn iter<'a>(&'a self) -> Self::Iter<'a>
-    where
-        Self::Item: 'a;
-
-    fn is_empty<'a>(&'a self) -> bool
-    where
-        Self::Iter<'a>: ExactSizeIterator,
-    {
-        self.len() == 0
-    }
-
-    fn len<'a>(&'a self) -> usize
-    where
-        Self::Iter<'a>: ExactSizeIterator,
-    {
-        self.iter().len()
-    }
-}
-
-impl<S, T> Sequence for S
-where
-    for<'a> &'a S: IntoIterator<Item = T>,
-{
-    type Item = T;
-
-    type Iter<'a>
-        = <&'a S as IntoIterator>::IntoIter
-    where
-        Self: 'a,
-        T: 'a;
-
-    fn iter<'a>(&'a self) -> Self::Iter<'a>
-    where
-        Self::Item: 'a,
-    {
-        self.into_iter()
-    }
-}
-
-pub struct SequenceRepr<T: ?Sized>(NonNull<T>);
-
-impl<T: ?Sized> SequenceRepr<T> {
-    pub fn visit<F, R>(seq: &T, f: F) -> R
-    where
-        F: FnOnce(&Self) -> R,
-    {
-        f(&Self(NonNull::from_ref(seq)))
-    }
-
-    pub fn is_empty<'a>(&'a self) -> bool
-    where
-        &'a T: IntoIterator<IntoIter: ExactSizeIterator>,
-    {
-        self.len() == 0
-    }
-
-    pub fn len<'a>(&'a self) -> usize
-    where
-        &'a T: IntoIterator<IntoIter: ExactSizeIterator>,
-    {
-        self.iter().len()
-    }
-
-    pub fn iter<'a>(&'a self) -> <&'a T as IntoIterator>::IntoIter
-    where
-        &'a T: IntoIterator,
-    {
-        (&**self).into_iter()
-    }
-}
-
-impl<T: ?Sized> core::ops::Deref for SequenceRepr<T> {
-    type Target = T;
-
-    fn deref(&self) -> &Self::Target {
-        unsafe { self.0.as_ref() }
-    }
-}
-
-impl<'a, T: ?Sized> IntoIterator for &'a SequenceRepr<T>
-where
-    &'a T: IntoIterator,
-{
-    type Item = <&'a T as IntoIterator>::Item;
-    type IntoIter = <&'a T as IntoIterator>::IntoIter;
-
-    fn into_iter(self) -> Self::IntoIter {
-        self.iter()
-    }
-}
-
-self_repr!(SequenceRepr<T: ?Sized>);
-
 cfg_select!(feature = "alloc" => {
     map_repr!([T: VisitPortableRepr + ?Sized] |val: &alloc::boxed::Box<T>| -> &T { val });
     map_repr!([T: VisitPortableRepr + ?Sized] |val: &alloc::rc::Rc<T>| -> &T { val });
@@ -610,49 +708,10 @@ cfg_select!(feature = "alloc" => {
     map_repr!(|val: &alloc::ffi::CString| -> &core::ffi::CStr { val });
     map_repr!([T: VisitPortableRepr + alloc::borrow::ToOwned + ?Sized] |val: &alloc::borrow::Cow<'_, T>| -> &T { val });
 
-    impl<T> VisitPortableRepr for alloc::collections::BTreeSet<T> {
-        type Repr = SequenceRepr<Self>;
-
-        fn visit_portable_repr<F, R>(&self, f: F) -> R
-        where
-            F: FnOnce(&Self::Repr) -> R,
-        {
-            SequenceRepr::<Self>::visit(self, f)
-        }
-    }
-
-    impl<K, V> VisitPortableRepr for alloc::collections::BTreeMap<K, V> {
-        type Repr = SequenceRepr<Self>;
-
-        fn visit_portable_repr<F, R>(&self, f: F) -> R
-        where
-            F: FnOnce(&Self::Repr) -> R,
-        {
-            SequenceRepr::<Self>::visit(self, f)
-        }
-    }
-
-    impl<T> VisitPortableRepr for alloc::collections::LinkedList<T> {
-        type Repr = SequenceRepr<Self>;
-
-        fn visit_portable_repr<F, R>(&self, f: F) -> R
-        where
-            F: FnOnce(&Self::Repr) -> R,
-        {
-            SequenceRepr::<Self>::visit(self, f)
-        }
-    }
-
-    impl<T> VisitPortableRepr for alloc::collections::VecDeque<T> {
-        type Repr = SequenceRepr<Self>;
-
-        fn visit_portable_repr<F, R>(&self, f: F) -> R
-        where
-            F: FnOnce(&Self::Repr) -> R,
-        {
-            SequenceRepr::<Self>::visit(self, f)
-        }
-    }
+    self_repr!(alloc::collections::BTreeSet<T>);
+    self_repr!(alloc::collections::BTreeMap<K, V>);
+    self_repr!(alloc::collections::LinkedList<T>);
+    self_repr!(alloc::collections::VecDeque<T>);
 } _ => {});
 
 cfg_select!(feature = "rkyv-0_8" => {
@@ -663,25 +722,29 @@ cfg_select!(feature = "rkyv-0_8" => {
         |val: &rkyv_0_8::boxed::ArchivedBox<T>| -> &T { val }
     }
 
-    impl<T, const E: usize> VisitPortableRepr for rkyv_0_8::collections::btree_set::ArchivedBTreeSet<T, E> {
-        type Repr = SequenceRepr<Self>;
+    impl<T, const E: usize> VisitPortableRepr
+        for rkyv_0_8::collections::btree_set::ArchivedBTreeSet<T, E>
+    {
+        type Repr = Self;
 
         fn visit_portable_repr<F, R>(&self, f: F) -> R
         where
             F: FnOnce(&Self::Repr) -> R,
         {
-            SequenceRepr::<Self>::visit(self, f)
+            f(self)
         }
     }
 
-    impl<K, V, const E: usize> VisitPortableRepr for rkyv_0_8::collections::btree_map::ArchivedBTreeMap<K, V, E> {
-        type Repr = SequenceRepr<Self>;
+    impl<K, V, const E: usize> VisitPortableRepr
+        for rkyv_0_8::collections::btree_map::ArchivedBTreeMap<K, V, E>
+    {
+        type Repr = Self;
 
         fn visit_portable_repr<F, R>(&self, f: F) -> R
         where
             F: FnOnce(&Self::Repr) -> R,
         {
-            SequenceRepr::<Self>::visit(self, f)
+            f(self)
         }
     }
 
@@ -976,6 +1039,22 @@ cfg_select!(feature = "triomphe-0_1" => {
         |val: &triomphe_0_1::ArcBorrow<'_, T>| -> &T { val.get() }
     }
 
+    /// Portable representation of a `triomphe::ArcUnion`, holding a borrowed view of the
+    /// contained value.
+    ///
+    /// A `First` sorts before any `Second`.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use portable::PortableEq;
+    /// use triomphe_0_1::{Arc, ArcUnion};
+    ///
+    /// let a = ArcUnion::<u32, u64>::from_first(Arc::new(1));
+    /// let b = ArcUnion::<u32, u64>::from_first(Arc::new(1));
+    ///
+    /// assert!(a.portable_eq(&b));
+    /// ```
     pub struct ArcUnionRepr<A, B>(ArcUnionReprInner<A, B>);
 
     enum ArcUnionReprInner<A, B> {
@@ -984,6 +1063,21 @@ cfg_select!(feature = "triomphe-0_1" => {
     }
 
     impl<A, B> ArcUnionRepr<A, B> {
+        /// Calls `f` with the representation of a borrowed union.
+        ///
+        /// # Example
+        ///
+        /// ```
+        /// use portable::repr::ArcUnionRepr;
+        /// use triomphe_0_1::{Arc, ArcUnion, ArcUnionBorrow};
+        ///
+        /// let union = ArcUnion::<u32, u64>::from_first(Arc::new(1));
+        /// let is_first = ArcUnionRepr::visit(union.borrow(), |repr| {
+        ///     matches!(repr.borrow(), ArcUnionBorrow::First(_))
+        /// });
+        ///
+        /// assert!(is_first);
+        /// ```
         pub fn visit<F, R>(arc: triomphe_0_1::ArcUnionBorrow<'_, A, B>, f: F) -> R
         where
             F: FnOnce(&Self) -> R,
@@ -996,9 +1090,29 @@ cfg_select!(feature = "triomphe-0_1" => {
             }))
         }
 
+        /// Returns the represented union as a borrow of its contained value.
+        ///
+        /// # Example
+        ///
+        /// ```
+        /// use portable::repr::ArcUnionRepr;
+        /// use triomphe_0_1::{Arc, ArcUnion, ArcUnionBorrow};
+        ///
+        /// let union = ArcUnion::<u32, u64>::from_first(Arc::new(1));
+        /// let value = ArcUnionRepr::visit(union.borrow(), |repr| match repr.borrow() {
+        ///     ArcUnionBorrow::First(first) => u64::from(*first.get()),
+        ///     ArcUnionBorrow::Second(second) => *second.get(),
+        /// });
+        ///
+        /// assert_eq!(value, 1);
+        /// ```
         pub fn borrow(&self) -> triomphe_0_1::ArcUnionBorrow<'_, A, B> {
             use triomphe_0_1::ArcUnionBorrow::{First, Second};
 
+            // SAFETY: `ArcBorrow` is `repr(transparent)` over `NonNull<T>`, and the pointers
+            // are only ever set by `visit` from a live `ArcBorrow`, which keeps the value
+            // alive for as long as the `Self` it builds is lent out. The returned borrow is
+            // tied to `&self`, so it cannot outlive that.
             match &self.0 {
                 ArcUnionReprInner::First(a) => First(unsafe {
                     core::mem::transmute::<NonNull<A>, triomphe_0_1::ArcBorrow<'_, A>>(*a)
