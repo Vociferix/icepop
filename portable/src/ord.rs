@@ -100,7 +100,7 @@ where
     }
 }
 
-impl<K: PortableOrd + PortableRepr + ?Sized> PortableReprOrd<K> for core::convert::Infallible {
+impl<K: PortableRepr + ?Sized> PortableReprOrd<K> for core::convert::Infallible {
     fn portable_repr_cmp(&self, other: &K) -> Ordering {
         let _ = other;
         Ordering::Equal
@@ -535,6 +535,25 @@ impl PortableReprOrd<core::convert::Infallible> for core::marker::PhantomPinned 
     }
 }
 
+impl<T, U> PortableReprOrd<core::cmp::Reverse<U>> for core::cmp::Reverse<T>
+where
+    T: PortableOrd<U>,
+{
+    fn portable_repr_cmp(&self, other: &core::cmp::Reverse<U>) -> Ordering {
+        self.0.portable_cmp(&other.0).reverse()
+    }
+}
+
+impl<T> PortableReprOrd<core::convert::Infallible> for core::cmp::Reverse<T>
+where
+    T: PortableOrd,
+{
+    fn portable_repr_cmp(&self, other: &core::convert::Infallible) -> Ordering {
+        let _ = other;
+        Ordering::Equal
+    }
+}
+
 impl<T, U> PortableReprOrd<core::task::Poll<U>> for core::task::Poll<T>
 where
     T: PortableOrd<U>,
@@ -643,6 +662,59 @@ where
     }
 }
 
+#[cfg(feature = "triomphe-0_1")]
+impl<H1, T1, H2, T2> PortableReprOrd<triomphe_0_1::HeaderSlice<H2, T2>>
+    for triomphe_0_1::HeaderSlice<H1, T1>
+where
+    H1: PortableOrd<H2>,
+    T1: PortableOrd<T2> + ?Sized,
+    T2: ?Sized,
+{
+    fn portable_repr_cmp(&self, other: &triomphe_0_1::HeaderSlice<H2, T2>) -> Ordering {
+        match self.header.portable_cmp(&other.header) {
+            Ordering::Equal => self.slice.portable_cmp(&other.slice),
+            ord => ord,
+        }
+    }
+}
+
+#[cfg(feature = "triomphe-0_1")]
+impl<H, T> PortableReprOrd<core::convert::Infallible> for triomphe_0_1::HeaderSlice<H, T>
+where
+    H: PortableOrd,
+    T: PortableOrd + ?Sized,
+{
+    fn portable_repr_cmp(&self, other: &core::convert::Infallible) -> Ordering {
+        let _ = other;
+        Ordering::Equal
+    }
+}
+
+#[cfg(feature = "triomphe-0_1")]
+impl<H1, H2> PortableReprOrd<triomphe_0_1::HeaderWithLength<H2>>
+    for triomphe_0_1::HeaderWithLength<H1>
+where
+    H1: PortableOrd<H2>,
+{
+    fn portable_repr_cmp(&self, other: &triomphe_0_1::HeaderWithLength<H2>) -> Ordering {
+        match self.header.portable_cmp(&other.header) {
+            Ordering::Equal => self.length.portable_cmp(&other.length),
+            ord => ord,
+        }
+    }
+}
+
+#[cfg(feature = "triomphe-0_1")]
+impl<H> PortableReprOrd<core::convert::Infallible> for triomphe_0_1::HeaderWithLength<H>
+where
+    H: PortableOrd,
+{
+    fn portable_repr_cmp(&self, other: &core::convert::Infallible) -> Ordering {
+        let _ = other;
+        Ordering::Equal
+    }
+}
+
 #[cfg(feature = "either-1")]
 impl<L1, R1, L2, R2> PortableReprOrd<either_1::Either<L2, R2>> for either_1::Either<L1, R1>
 where
@@ -670,5 +742,290 @@ where
     fn portable_repr_cmp(&self, other: &core::convert::Infallible) -> Ordering {
         let _ = other;
         Ordering::Equal
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::PortableOrd;
+
+    use crate::{AssertPortable, Portable};
+
+    use core::cmp::Ordering;
+
+    #[test]
+    fn size_types_order_against_every_width_they_may_be_stored_as() {
+        assert_eq!(2usize.portable_cmp(&10u64), Ordering::Less);
+        assert_eq!(2usize.portable_cmp(&2u16), Ordering::Equal);
+        assert_eq!(10u32.portable_cmp(&2usize), Ordering::Greater);
+
+        // Widening must sign-extend, so negatives stay below positives.
+        assert_eq!((-1isize).portable_cmp(&0i16), Ordering::Less);
+        assert_eq!((-1isize).portable_cmp(&-2i32), Ordering::Greater);
+        assert_eq!(
+            i16::MIN.portable_cmp(&isize::from(i16::MIN)),
+            Ordering::Equal
+        );
+    }
+
+    #[test]
+    fn slices_order_lexicographically() {
+        let slice: &[u32] = &[1, 2, 3];
+
+        // A prefix sorts before the longer sequence.
+        assert_eq!(<[u32]>::portable_cmp(&[1, 2][..], slice), Ordering::Less);
+        assert_eq!(
+            <[u32]>::portable_cmp(&[1, 2, 3, 4][..], slice),
+            Ordering::Greater
+        );
+        assert_eq!(<[u32]>::portable_cmp(&[][..], slice), Ordering::Less);
+
+        // The first differing element decides, regardless of what follows.
+        assert_eq!(<[u32]>::portable_cmp(&[1, 9][..], slice), Ordering::Greater);
+        assert_eq!(
+            <[u32]>::portable_cmp(&[0, 9, 9, 9][..], slice),
+            Ordering::Less
+        );
+        assert_eq!([1u32, 2, 3].portable_cmp(slice), Ordering::Equal);
+    }
+
+    #[test]
+    fn option_orders_none_before_some() {
+        assert_eq!(None::<usize>.portable_cmp(&Some(0u64)), Ordering::Less);
+        assert_eq!(Some(1usize).portable_cmp(&None::<u64>), Ordering::Greater);
+        assert_eq!(None::<usize>.portable_cmp(&None::<u64>), Ordering::Equal);
+        assert_eq!(Some(1usize).portable_cmp(&Some(2u64)), Ordering::Less);
+    }
+
+    #[test]
+    fn result_orders_ok_before_err() {
+        assert_eq!(
+            Ok::<usize, u8>(9).portable_cmp(&Err::<u64, u8>(0)),
+            Ordering::Less
+        );
+        assert_eq!(
+            Err::<usize, u8>(0).portable_cmp(&Ok::<u64, u8>(9)),
+            Ordering::Greater
+        );
+        assert_eq!(
+            Ok::<usize, u8>(1).portable_cmp(&Ok::<u64, u8>(2)),
+            Ordering::Less
+        );
+        assert_eq!(
+            Err::<usize, u8>(1).portable_cmp(&Err::<u64, u8>(2)),
+            Ordering::Less
+        );
+    }
+
+    #[test]
+    fn poll_orders_ready_before_pending() {
+        use core::task::Poll::{Pending, Ready};
+
+        assert_eq!(Ready(9usize).portable_cmp(&Pending::<u64>), Ordering::Less);
+        assert_eq!(
+            Pending::<usize>.portable_cmp(&Ready(9u64)),
+            Ordering::Greater
+        );
+        assert_eq!(
+            Pending::<usize>.portable_cmp(&Pending::<u64>),
+            Ordering::Equal
+        );
+    }
+
+    #[test]
+    fn tuples_order_by_the_first_differing_element() {
+        assert_eq!((1usize, 9usize).portable_cmp(&(2u64, 0u32)), Ordering::Less);
+        assert_eq!(
+            (1usize, 9usize).portable_cmp(&(1u64, 0u32)),
+            Ordering::Greater
+        );
+        assert_eq!(
+            (1usize, 9usize).portable_cmp(&(1u64, 9u32)),
+            Ordering::Equal
+        );
+    }
+
+    #[test]
+    fn reverse_inverts_the_ordering_of_its_inner_value() {
+        use core::cmp::Reverse;
+
+        assert_eq!(
+            Reverse(1usize).portable_cmp(&Reverse(2u64)),
+            Ordering::Greater
+        );
+        assert_eq!(Reverse(2usize).portable_cmp(&Reverse(1u64)), Ordering::Less);
+        assert_eq!(
+            Reverse(1usize).portable_cmp(&Reverse(1u64)),
+            Ordering::Equal
+        );
+    }
+
+    #[test]
+    fn portable_wrapper_bridges_std_ordering_across_types() {
+        assert!(Portable(2usize) < Portable(10u64));
+        assert_eq!(
+            Ord::cmp(&Portable(2usize), &Portable(10usize)),
+            Ordering::Less
+        );
+        assert!(Portable::from_ref(&[1u32, 2][..]) < Portable::from_ref(&[1u32, 3][..]));
+    }
+
+    #[test]
+    fn assert_portable_defers_to_std_ordering() {
+        assert_eq!(
+            AssertPortable("a").portable_cmp(&AssertPortable("b")),
+            Ordering::Less
+        );
+    }
+
+    #[cfg(feature = "rend-0_5")]
+    #[test]
+    fn endian_aware_integers_order_by_their_native_value() {
+        // Byte order must not leak into the comparison.
+        assert_eq!(
+            rend_0_5::u32_be::from_native(2).portable_cmp(&10u32),
+            Ordering::Less
+        );
+        assert_eq!(
+            rend_0_5::u32_be::from_native(2).portable_cmp(&rend_0_5::u32_le::from_native(10)),
+            Ordering::Less,
+        );
+    }
+
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn owned_sequences_order_lexicographically_against_slices() {
+        use alloc::collections::{BTreeSet, LinkedList, VecDeque};
+        use alloc::vec;
+
+        let slice: &[u32] = &[1, 2, 3];
+
+        assert_eq!(vec![1u32, 2].portable_cmp(slice), Ordering::Less);
+        assert_eq!(
+            VecDeque::from(vec![1u32, 2]).portable_cmp(slice),
+            Ordering::Less
+        );
+        assert_eq!(
+            VecDeque::from(vec![1u32, 9]).portable_cmp(slice),
+            Ordering::Greater
+        );
+        assert_eq!(
+            BTreeSet::from([1u32, 2, 3, 4]).portable_cmp(slice),
+            Ordering::Greater
+        );
+        assert_eq!(
+            LinkedList::from([1u32, 2, 3]).portable_cmp(slice),
+            Ordering::Equal
+        );
+        assert_eq!(
+            slice.portable_cmp(&VecDeque::from(vec![1u32, 2])),
+            Ordering::Greater
+        );
+        assert_eq!(
+            VecDeque::from(vec![1usize, 2]).portable_cmp(&VecDeque::from(vec![1u64, 3])),
+            Ordering::Less,
+        );
+    }
+
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn maps_order_by_key_before_value() {
+        use alloc::collections::BTreeMap;
+
+        let map = BTreeMap::from([(1u32, 10u64), (2, 20)]);
+
+        // A greater key wins even when its value is smaller.
+        assert_eq!(
+            map.portable_cmp(&[(1u32, 10u64), (3, 0)][..]),
+            Ordering::Less
+        );
+        // With equal keys the value decides.
+        assert_eq!(
+            map.portable_cmp(&[(1u32, 10u64), (2, 19)][..]),
+            Ordering::Greater
+        );
+        assert_eq!(map.portable_cmp(&[(1u32, 10u64)][..]), Ordering::Greater);
+        assert_eq!(
+            [(1u32, 10u64), (2, 20)][..].portable_cmp(&map),
+            Ordering::Equal
+        );
+    }
+
+    #[cfg(all(feature = "rkyv-0_8", feature = "alloc"))]
+    #[test]
+    fn archived_btrees_order_against_their_native_counterparts() {
+        use alloc::collections::BTreeSet;
+
+        use rkyv_0_8::collections::btree_set::ArchivedBTreeSet;
+        use rkyv_0_8::rancor::Error;
+        use rkyv_0_8::rend::u32_le;
+
+        let set = BTreeSet::from([1u32, 2, 3]);
+        let bytes = rkyv_0_8::to_bytes::<Error>(&set).unwrap();
+        // SAFETY: the bytes were just produced by `to_bytes` for this exact type.
+        let archived = unsafe { rkyv_0_8::access_unchecked::<ArchivedBTreeSet<u32_le>>(&bytes) };
+
+        assert_eq!(archived.portable_cmp(&set), Ordering::Equal);
+        assert_eq!(
+            archived.portable_cmp(&BTreeSet::from([1u32, 2])),
+            Ordering::Greater
+        );
+        assert_eq!(
+            BTreeSet::from([1u32, 2]).portable_cmp(archived),
+            Ordering::Less
+        );
+    }
+
+    #[cfg(feature = "triomphe-0_1")]
+    #[test]
+    fn thin_arcs_order_by_header_before_slice() {
+        use triomphe_0_1::ThinArc;
+
+        let arc = ThinArc::from_header_and_iter(1u32, [5u32].into_iter());
+
+        // A greater header wins even when the slice is smaller.
+        assert_eq!(
+            arc.portable_cmp(&ThinArc::from_header_and_iter(2u32, [0u32].into_iter())),
+            Ordering::Less,
+        );
+        assert_eq!(
+            arc.portable_cmp(&ThinArc::from_header_and_iter(1u32, [4u32].into_iter())),
+            Ordering::Greater,
+        );
+    }
+
+    #[cfg(feature = "triomphe-0_1")]
+    #[test]
+    fn arc_union_orders_first_before_second() {
+        use triomphe_0_1::{Arc, ArcUnion};
+
+        let first = ArcUnion::<u32, u64>::from_first(Arc::new(9));
+        let second = ArcUnion::<u32, u64>::from_second(Arc::new(0));
+
+        assert_eq!(first.portable_cmp(&second), Ordering::Less);
+        assert_eq!(second.portable_cmp(&first), Ordering::Greater);
+        assert_eq!(
+            first.portable_cmp(&ArcUnion::<u32, u64>::from_first(Arc::new(10))),
+            Ordering::Less,
+        );
+    }
+
+    #[cfg(feature = "either-1")]
+    #[test]
+    fn either_orders_left_before_right() {
+        use either_1::Either::{Left, Right};
+
+        assert_eq!(
+            Left::<usize, u8>(9).portable_cmp(&Right::<u64, u8>(0)),
+            Ordering::Less
+        );
+        assert_eq!(
+            Right::<usize, u8>(0).portable_cmp(&Left::<u64, u8>(9)),
+            Ordering::Greater
+        );
+        assert_eq!(
+            Left::<usize, u8>(1).portable_cmp(&Left::<u64, u8>(2)),
+            Ordering::Less
+        );
     }
 }

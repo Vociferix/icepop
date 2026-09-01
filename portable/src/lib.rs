@@ -78,6 +78,9 @@
 #[cfg(feature = "alloc")]
 extern crate alloc;
 
+#[cfg(test)]
+extern crate std;
+
 pub mod eq;
 pub mod hash;
 pub mod hasher;
@@ -291,5 +294,46 @@ impl<T: ?Sized> core::ops::Deref for AssertPortable<T> {
 impl<T: ?Sized> core::ops::DerefMut for AssertPortable<T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{AssertPortable, Portable};
+
+    #[test]
+    fn portable_from_ref_preserves_unsized_metadata() {
+        let slice: &[u32] = &[1, 2, 3];
+
+        assert_eq!(Portable::from_ref(slice).0.len(), 3);
+        assert_eq!(&Portable::from_ref(slice).0, slice);
+        assert_eq!(&Portable::from_ref("hello").0, "hello");
+    }
+
+    #[test]
+    fn portable_from_mut_writes_through() {
+        let mut values = [1u32, 2, 3];
+
+        Portable::from_mut(&mut values[..]).0[1] = 9;
+
+        assert_eq!(values, [1, 9, 3]);
+    }
+
+    #[test]
+    fn assert_portable_from_ref_preserves_unsized_metadata() {
+        let slice: &[u32] = &[1, 2, 3];
+
+        assert_eq!(AssertPortable::from_ref(slice).0.len(), 3);
+        assert_eq!(&AssertPortable::from_ref(slice).0, slice);
+        assert_eq!(&AssertPortable::from_ref("hello").0, "hello");
+    }
+
+    #[test]
+    fn assert_portable_from_mut_writes_through() {
+        let mut values = [1u32, 2, 3];
+
+        AssertPortable::from_mut(&mut values[..]).0[1] = 9;
+
+        assert_eq!(values, [1, 9, 3]);
     }
 }

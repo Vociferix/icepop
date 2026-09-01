@@ -177,7 +177,7 @@ unsafe fn slice_as_bytes<T>(slice: &[T]) -> &[u8] {
 
 impl<T> PortableHash for &T
 where
-    T: PortableHash,
+    T: PortableHash + ?Sized,
 {
     fn portable_hash<H>(&self, state: &mut H)
     where
@@ -189,7 +189,7 @@ where
 
 impl<T> PortableHash for &mut T
 where
-    T: PortableHash,
+    T: PortableHash + ?Sized,
 {
     fn portable_hash<H>(&self, state: &mut H)
     where
@@ -1114,8 +1114,8 @@ impl PortableHash for core::net::IpAddr {
         H: Hasher,
     {
         match self {
-            Self::V4(ip) => (false, ip).portable_hash(state),
-            Self::V6(ip) => (true, ip).portable_hash(state),
+            Self::V4(ip) => ip.portable_hash(state),
+            Self::V6(ip) => ip.portable_hash(state),
         }
     }
 }
@@ -1135,6 +1135,10 @@ impl PortableHash for core::net::SocketAddrV6 {
         H: Hasher,
     {
         (self.ip(), self.port()).portable_hash(state);
+        // Both fields sit at a fixed position in a fixed-width encoding, so they are written
+        // at their own width rather than widened the way a bare `u32` would be.
+        state.write(&self.flowinfo().to_le_bytes());
+        state.write(&self.scope_id().to_le_bytes());
     }
 }
 
@@ -1840,6 +1844,10 @@ cfg_select!(feature = "rkyv-0_8" => {
             H: Hasher,
         {
             (self.ip(), self.port()).portable_hash(state);
+            // Both fields sit at a fixed position in a fixed-width encoding, so they are
+            // written at their own width rather than widened the way a bare `u32` would be.
+            state.write(&self.flowinfo().to_le_bytes());
+            state.write(&self.scope_id().to_le_bytes());
         }
     }
 
@@ -1848,7 +1856,10 @@ cfg_select!(feature = "rkyv-0_8" => {
         where
             H: Hasher,
         {
-            (self.ip(), self.port()).portable_hash(state);
+            match self {
+                Self::V4(addr) => addr.portable_hash(state),
+                Self::V6(addr) => addr.portable_hash(state),
+            }
         }
     }
 
@@ -2276,7 +2287,7 @@ cfg_select!(feature = "ascii-1" => {
         where
             H: Hasher,
         {
-            (*self as u8).portable_hash(state);
+            self.as_char().portable_hash(state);
         }
     }
 
@@ -2285,7 +2296,7 @@ cfg_select!(feature = "ascii-1" => {
         where
             H: Hasher,
         {
-            self.as_bytes().portable_hash(state);
+            self.as_str().portable_hash(state);
         }
     }
 
@@ -2295,7 +2306,7 @@ cfg_select!(feature = "ascii-1" => {
         where
             H: Hasher,
         {
-            self.as_bytes().portable_hash(state);
+            self.as_str().portable_hash(state);
         }
     }
 } _ => {});
@@ -2582,3 +2593,507 @@ cfg_select!(feature = "either-1" => {
         }
     }
 } _ => {});
+
+#[cfg(test)]
+mod tests {
+    use super::PortableHash;
+
+    use crate::eq::PortableEq;
+    use crate::{AssertPortable, Portable};
+
+    use core::num::{
+        NonZeroI8, NonZeroI64, NonZeroI128, NonZeroIsize, NonZeroU8, NonZeroU64, NonZeroU128,
+        NonZeroUsize, Saturating, Wrapping,
+    };
+
+    use std::vec::Vec;
+
+    /// Hasher that records the bytes written to it, so hashes can be compared byte for byte.
+    #[derive(Default)]
+    struct Recorder(Vec<u8>);
+
+    impl core::hash::Hasher for Recorder {
+        fn finish(&self) -> u64 {
+            0
+        }
+
+        fn write(&mut self, bytes: &[u8]) {
+            self.0.extend_from_slice(bytes);
+        }
+    }
+
+    fn bytes_of<T>(value: &T) -> Vec<u8>
+    where
+        T: PortableHash + ?Sized,
+    {
+        let mut state = Recorder::default();
+        value.portable_hash(&mut state);
+        state.0
+    }
+
+    /// Asserts that `T`'s `portable_hash_slice` writes exactly what hashing each element
+    /// separately would, which is the only thing overriding it is allowed to change.
+    fn assert_slice_shortcut_matches_elements<T>(values: &[T])
+    where
+        T: PortableHash,
+    {
+        for len in 0..=values.len() {
+            let slice = &values[..len];
+
+            let mut shortcut = Recorder::default();
+            T::portable_hash_slice(slice, &mut shortcut);
+
+            let mut element_wise = Recorder::default();
+            slice
+                .iter()
+                .for_each(|value| value.portable_hash(&mut element_wise));
+
+            assert_eq!(shortcut.0, element_wise.0, "length {len}");
+        }
+    }
+
+    #[test]
+    fn integers_are_hashed_as_little_endian_bytes_of_their_widest_form() {
+        // Every integer that a `usize` may be stored as widens to the same eight bytes, so
+        // values that compare equal across widths hash equally.
+        let one = 1u64.to_le_bytes().to_vec();
+
+        assert_eq!(bytes_of(&1u16), one);
+        assert_eq!(bytes_of(&1u32), one);
+        assert_eq!(bytes_of(&1u64), one);
+        assert_eq!(bytes_of(&1usize), one);
+
+        let minus_one = (-1i64).to_le_bytes().to_vec();
+
+        assert_eq!(bytes_of(&-1i16), minus_one);
+        assert_eq!(bytes_of(&-1i32), minus_one);
+        assert_eq!(bytes_of(&-1i64), minus_one);
+        assert_eq!(bytes_of(&-1isize), minus_one);
+
+        assert_eq!(bytes_of(&1u128), 1u128.to_le_bytes().to_vec());
+        assert_eq!(bytes_of(&-1i128), (-1i128).to_le_bytes().to_vec());
+
+        // Byte-wide values are written as a single byte.
+        assert_eq!(bytes_of(&1u8), std::vec![1]);
+        assert_eq!(bytes_of(&-1i8), std::vec![0xff]);
+        assert_eq!(bytes_of(&true), std::vec![1]);
+        assert_eq!(bytes_of(&false), std::vec![0]);
+    }
+
+    #[test]
+    fn other_primitives_are_hashed_as_fixed_little_endian_byte_sequences() {
+        assert_eq!(bytes_of(&'A'), 65u32.to_le_bytes().to_vec());
+        assert_eq!(bytes_of(&'\u{10ffff}'), 0x10ffffu32.to_le_bytes().to_vec());
+        assert_eq!(bytes_of(&()), Vec::<u8>::new());
+        assert_eq!(
+            bytes_of(&core::marker::PhantomData::<u32>),
+            Vec::<u8>::new()
+        );
+
+        assert_eq!(bytes_of(&core::cmp::Ordering::Less), std::vec![0xff]);
+        assert_eq!(bytes_of(&core::cmp::Ordering::Equal), std::vec![0]);
+        assert_eq!(bytes_of(&core::cmp::Ordering::Greater), std::vec![1]);
+    }
+
+    #[test]
+    fn strings_are_hashed_so_that_no_encoding_is_a_prefix_of_another() {
+        // The terminator keeps concatenations from colliding.
+        assert_ne!(
+            [bytes_of("a"), bytes_of("b")].concat(),
+            [bytes_of("ab"), bytes_of("")].concat(),
+        );
+        assert_eq!(bytes_of("hi"), [b"hi".as_slice(), b"\xff"].concat());
+        assert_eq!(bytes_of(c"hi"), b"hi\0".to_vec());
+    }
+
+    #[test]
+    fn slices_hash_their_length() {
+        // Without a length the nesting would be ambiguous.
+        assert_ne!(
+            bytes_of(&[&[1u32][..], &[2, 3][..]][..]),
+            bytes_of(&[&[1u32, 2][..], &[3][..]][..]),
+        );
+        assert_ne!(bytes_of(&[1u32, 2][..]), bytes_of(&[1u32, 2, 0][..]));
+    }
+
+    #[test]
+    fn slice_shortcuts_agree_with_hashing_elements_separately() {
+        assert_slice_shortcut_matches_elements(&[true, false, true]);
+        assert_slice_shortcut_matches_elements(&[1u8, 2, 0xff]);
+        assert_slice_shortcut_matches_elements(&[1u64, 2, u64::MAX]);
+        assert_slice_shortcut_matches_elements(&[1u128, 2, u128::MAX]);
+        assert_slice_shortcut_matches_elements(&[1usize, 2, usize::MAX]);
+        assert_slice_shortcut_matches_elements(&[-1i8, 2, i8::MIN]);
+        assert_slice_shortcut_matches_elements(&[-1i64, 2, i64::MIN]);
+        assert_slice_shortcut_matches_elements(&[-1i128, 2, i128::MIN]);
+        assert_slice_shortcut_matches_elements(&[-1isize, 2, isize::MIN]);
+        assert_slice_shortcut_matches_elements(&['a', '\u{10ffff}', '\0']);
+
+        assert_slice_shortcut_matches_elements(&[
+            NonZeroU8::new(1).unwrap(),
+            NonZeroU8::new(2).unwrap(),
+        ]);
+        assert_slice_shortcut_matches_elements(&[
+            NonZeroU64::new(1).unwrap(),
+            NonZeroU64::new(2).unwrap(),
+        ]);
+        assert_slice_shortcut_matches_elements(&[
+            NonZeroU128::new(1).unwrap(),
+            NonZeroU128::new(2).unwrap(),
+        ]);
+        assert_slice_shortcut_matches_elements(&[
+            NonZeroUsize::new(1).unwrap(),
+            NonZeroUsize::new(2).unwrap(),
+        ]);
+        assert_slice_shortcut_matches_elements(&[
+            NonZeroI8::new(-1).unwrap(),
+            NonZeroI8::new(2).unwrap(),
+        ]);
+        assert_slice_shortcut_matches_elements(&[
+            NonZeroI64::new(-1).unwrap(),
+            NonZeroI64::new(2).unwrap(),
+        ]);
+        assert_slice_shortcut_matches_elements(&[
+            NonZeroI128::new(-1).unwrap(),
+            NonZeroI128::new(2).unwrap(),
+        ]);
+        assert_slice_shortcut_matches_elements(&[
+            NonZeroIsize::new(-1).unwrap(),
+            NonZeroIsize::new(2).unwrap(),
+        ]);
+
+        assert_slice_shortcut_matches_elements(&[(), ()]);
+        assert_slice_shortcut_matches_elements(&[core::marker::PhantomData::<u32>; 2]);
+        assert_slice_shortcut_matches_elements(&[
+            core::marker::PhantomPinned,
+            core::marker::PhantomPinned,
+        ]);
+        assert_slice_shortcut_matches_elements(&[.., ..]);
+
+        // Transparent wrappers reinterpret the slice rather than walking it.
+        assert_slice_shortcut_matches_elements(&[core::cmp::Reverse(1u64), core::cmp::Reverse(2)]);
+        assert_slice_shortcut_matches_elements(&[Saturating(1u64), Saturating(2)]);
+        assert_slice_shortcut_matches_elements(&[Wrapping(1u64), Wrapping(2)]);
+        assert_slice_shortcut_matches_elements(&[Portable(1u64), Portable(2)]);
+        assert_slice_shortcut_matches_elements(&[Portable(1u16), Portable(2)]);
+    }
+
+    #[cfg(feature = "rend-0_5")]
+    #[test]
+    fn endian_aware_slice_shortcuts_agree_with_hashing_elements_separately() {
+        use rend_0_5::{
+            NonZeroI64_le, NonZeroI128_le, NonZeroU64_le, NonZeroU128_le, char_le, i64_le, i128_le,
+            u64_le, u128_le,
+        };
+
+        assert_slice_shortcut_matches_elements(&[
+            u64_le::from_native(1),
+            u64_le::from_native(u64::MAX),
+        ]);
+        assert_slice_shortcut_matches_elements(&[
+            u128_le::from_native(1),
+            u128_le::from_native(u128::MAX),
+        ]);
+        assert_slice_shortcut_matches_elements(&[
+            i64_le::from_native(-1),
+            i64_le::from_native(i64::MIN),
+        ]);
+        assert_slice_shortcut_matches_elements(&[
+            i128_le::from_native(-1),
+            i128_le::from_native(i128::MIN),
+        ]);
+        assert_slice_shortcut_matches_elements(&[
+            char_le::from_native('a'),
+            char_le::from_native('\u{10ffff}'),
+        ]);
+        assert_slice_shortcut_matches_elements(&[
+            NonZeroU64_le::from_native(NonZeroU64::new(1).unwrap()),
+            NonZeroU64_le::from_native(NonZeroU64::new(2).unwrap()),
+        ]);
+        assert_slice_shortcut_matches_elements(&[
+            NonZeroU128_le::from_native(NonZeroU128::new(1).unwrap()),
+            NonZeroU128_le::from_native(NonZeroU128::new(2).unwrap()),
+        ]);
+        assert_slice_shortcut_matches_elements(&[
+            NonZeroI64_le::from_native(NonZeroI64::new(-1).unwrap()),
+            NonZeroI64_le::from_native(NonZeroI64::new(2).unwrap()),
+        ]);
+        assert_slice_shortcut_matches_elements(&[
+            NonZeroI128_le::from_native(NonZeroI128::new(-1).unwrap()),
+            NonZeroI128_le::from_native(NonZeroI128::new(2).unwrap()),
+        ]);
+    }
+
+    #[test]
+    fn enum_variants_are_distinguished_by_a_discriminant() {
+        assert_ne!(bytes_of(&Some(0u32)), bytes_of(&None::<u32>));
+        assert_ne!(bytes_of(&Ok::<u32, u32>(0)), bytes_of(&Err::<u32, u32>(0)));
+        assert_ne!(
+            bytes_of(&core::task::Poll::Ready(0u32)),
+            bytes_of(&core::task::Poll::<u32>::Pending),
+        );
+
+        use core::ops::Bound::{Excluded, Included, Unbounded};
+
+        assert_ne!(bytes_of(&Included(0u32)), bytes_of(&Excluded(0u32)));
+        assert_ne!(bytes_of(&Included(0u32)), bytes_of(&Unbounded::<u32>));
+    }
+
+    #[test]
+    fn ranges_of_every_kind_hash_their_bounds() {
+        assert_eq!(bytes_of(&(1u32..3)), bytes_of(&(1u32..3)));
+        assert_ne!(bytes_of(&(1u32..3)), bytes_of(&(1u32..=3)));
+        assert_ne!(bytes_of(&(1u32..)), bytes_of(&(..1u32)));
+        assert_ne!(bytes_of(&(1u32..3)), bytes_of(&(..)));
+    }
+
+    /// Asserts the contract between [`PortableEq`] and [`PortableHash`]: values that compare
+    /// equal hash equally, even when their types differ.
+    macro_rules! assert_contract {
+        ($left:expr, $right:expr $(,)?) => {{
+            let (left, right) = ($left, $right);
+
+            assert!(left.portable_eq(right), "expected equality");
+            assert_eq!(bytes_of(left), bytes_of(right), "expected equal hashes");
+        }};
+    }
+
+    #[test]
+    fn equal_values_hash_equally_across_types() {
+        assert_contract!(&1usize, &1u16);
+        assert_contract!(&1usize, &1u32);
+        assert_contract!(&1usize, &1u64);
+        assert_contract!(&-1isize, &-1i16);
+        assert_contract!(&-1isize, &-1i32);
+        assert_contract!(&-1isize, &-1i64);
+
+        assert_contract!(&NonZeroU64::new(1).unwrap(), &1u64);
+        assert_contract!(&NonZeroUsize::new(1).unwrap(), &1usize);
+        assert_contract!(&Wrapping(1u32), &1u32);
+        assert_contract!(&Saturating(1u32), &1u32);
+        assert_contract!(&core::panic::AssertUnwindSafe(1u32), &1u32);
+
+        assert_contract!(&[1u32, 2, 3], &[1u32, 2, 3][..]);
+        assert_contract!(&Some(1usize), &Some(1u64));
+        assert_contract!(&Ok::<usize, u8>(1), &Ok::<u64, u8>(1));
+        assert_contract!(&(1usize, 'x'), &(1u64, 'x'));
+
+        // A `SocketAddr` and its variant type share a representation.
+        let v4: core::net::SocketAddrV4 = "127.0.0.1:80".parse().unwrap();
+        assert_contract!(&v4, &core::net::SocketAddr::V4(v4));
+
+        // `flowinfo` and `scope_id` are part of a `SocketAddrV6`'s identity, so they must be
+        // carried across the representation too.
+        let v6 = core::net::SocketAddrV6::new(core::net::Ipv6Addr::LOCALHOST, 80, 7, 9);
+        assert_contract!(&v6, &core::net::SocketAddr::V6(v6));
+
+        // So do an `IpAddr` and the address it holds.
+        assert_contract!(
+            &core::net::Ipv4Addr::LOCALHOST,
+            &core::net::IpAddr::V4(core::net::Ipv4Addr::LOCALHOST)
+        );
+        assert_contract!(
+            &core::net::Ipv6Addr::LOCALHOST,
+            &core::net::IpAddr::V6(core::net::Ipv6Addr::LOCALHOST)
+        );
+    }
+
+    #[test]
+    fn socket_addresses_hash_every_field_their_equality_compares() {
+        use core::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
+
+        let v6 = SocketAddrV6::new(Ipv6Addr::LOCALHOST, 80, 7, 9);
+
+        for other in [
+            SocketAddrV6::new(Ipv6Addr::LOCALHOST, 80, 0, 9),
+            SocketAddrV6::new(Ipv6Addr::LOCALHOST, 80, 7, 0),
+            SocketAddrV6::new(Ipv6Addr::LOCALHOST, 81, 7, 9),
+        ] {
+            assert!(!v6.portable_eq(&other));
+            assert_ne!(bytes_of(&v6), bytes_of(&other));
+        }
+
+        // The two families are tagged by the address they hold, so neither can collide with
+        // the other and neither needs a tag of its own.
+        let v4 = SocketAddrV4::new(Ipv4Addr::LOCALHOST, 80);
+
+        assert_ne!(bytes_of(&SocketAddr::V4(v4)), bytes_of(&SocketAddr::V6(v6)));
+        assert_ne!(
+            bytes_of(&Ipv4Addr::LOCALHOST),
+            bytes_of(&Ipv6Addr::LOCALHOST)
+        );
+
+        // Every field is fixed width, so the encoding has a fixed length: a tagged address, a
+        // widened port, then `flowinfo` and `scope_id` at their own four bytes each.
+        assert_eq!(bytes_of(&v4).len(), 1 + 4 + 8);
+        assert_eq!(bytes_of(&v6).len(), 1 + 16 + 8 + 4 + 4);
+        assert_eq!(bytes_of(&v6)[25..], [7, 0, 0, 0, 9, 0, 0, 0]);
+    }
+
+    #[cfg(feature = "rend-0_5")]
+    #[test]
+    fn endian_aware_values_hash_like_their_native_form() {
+        assert_contract!(&rend_0_5::u32_le::from_native(5), &5u32);
+        assert_contract!(&rend_0_5::u32_be::from_native(5), &5u32);
+        assert_contract!(&rend_0_5::u64_le::from_native(5), &5u64);
+        assert_contract!(&rend_0_5::u64_be::from_native(5), &5u64);
+        assert_contract!(&rend_0_5::u64_le::from_native(5), &5usize);
+        assert_contract!(&rend_0_5::u128_le::from_native(5), &5u128);
+        assert_contract!(&rend_0_5::i64_le::from_native(-5), &-5i64);
+        assert_contract!(&rend_0_5::i128_le::from_native(-5), &-5i128);
+        assert_contract!(&rend_0_5::char_le::from_native('x'), &'x');
+        assert_contract!(&rend_0_5::char_be::from_native('x'), &'x');
+        assert_contract!(
+            &rend_0_5::NonZeroU64_le::from_native(NonZeroU64::new(5).unwrap()),
+            &NonZeroU64::new(5).unwrap(),
+        );
+    }
+
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn owned_values_hash_like_the_borrowed_forms_they_compare_with() {
+        use alloc::borrow::Cow;
+        use alloc::boxed::Box;
+        use alloc::collections::{BTreeMap, BTreeSet, LinkedList, VecDeque};
+        use alloc::string::String;
+        use alloc::vec;
+
+        assert_contract!(&vec![1u32, 2, 3], &[1u32, 2, 3][..]);
+        assert_contract!(&VecDeque::from(vec![1u32, 2, 3]), &[1u32, 2, 3][..]);
+        assert_contract!(&BTreeSet::from([1u32, 2, 3]), &[1u32, 2, 3][..]);
+        assert_contract!(&LinkedList::from([1u32, 2, 3]), &[1u32, 2, 3][..]);
+        assert_contract!(
+            &BTreeMap::from([(1u32, 10u64), (2, 20)]),
+            &[(1u32, 10u64), (2, 20)][..],
+        );
+
+        assert_contract!(&String::from("hi"), "hi");
+        assert_contract!(&Cow::Borrowed("hi"), "hi");
+        assert_contract!(&Box::new(1usize), &1u64);
+
+        // A wrapped-around `VecDeque` hashes its two halves as one logical sequence.
+        let mut wrapped = VecDeque::with_capacity(4);
+        wrapped.push_back(3u32);
+        wrapped.push_front(2);
+        wrapped.push_front(1);
+        assert_contract!(&wrapped, &[1u32, 2, 3][..]);
+    }
+
+    #[cfg(all(feature = "rkyv-0_8", feature = "alloc"))]
+    #[test]
+    fn archived_values_hash_like_the_values_they_were_archived_from() {
+        use alloc::collections::{BTreeMap, BTreeSet};
+        use alloc::string::{String, ToString};
+        use alloc::vec;
+
+        use rkyv_0_8::rancor::Error;
+
+        macro_rules! assert_archived_contract {
+            ($archived:ty, $value:expr) => {{
+                let value = $value;
+                let bytes = rkyv_0_8::to_bytes::<Error>(&value).unwrap();
+                // SAFETY: the bytes were just produced by `to_bytes` for this exact type.
+                let archived = unsafe { rkyv_0_8::access_unchecked::<$archived>(&bytes) };
+
+                assert_contract!(archived, &value);
+            }};
+        }
+
+        assert_archived_contract!(rkyv_0_8::rend::u32_le, 7u32);
+        assert_archived_contract!(rkyv_0_8::string::ArchivedString, String::from("hello"));
+        assert_archived_contract!(
+            rkyv_0_8::vec::ArchivedVec<rkyv_0_8::rend::u32_le>,
+            vec![1u32, 2, 3]
+        );
+        assert_archived_contract!(
+            rkyv_0_8::option::ArchivedOption<rkyv_0_8::rend::u32_le>,
+            Some(7u32)
+        );
+        assert_archived_contract!(
+            rkyv_0_8::time::ArchivedDuration,
+            core::time::Duration::new(3, 4)
+        );
+        assert_archived_contract!(
+            rkyv_0_8::net::ArchivedIpv4Addr,
+            core::net::Ipv4Addr::LOCALHOST
+        );
+        assert_archived_contract!(
+            rkyv_0_8::net::ArchivedSocketAddr,
+            "127.0.0.1:80".parse::<core::net::SocketAddr>().unwrap()
+        );
+        assert_archived_contract!(
+            rkyv_0_8::net::ArchivedSocketAddr,
+            core::net::SocketAddr::V6(core::net::SocketAddrV6::new(
+                core::net::Ipv6Addr::LOCALHOST,
+                80,
+                7,
+                9,
+            ))
+        );
+        assert_archived_contract!(
+            rkyv_0_8::net::ArchivedSocketAddrV6,
+            core::net::SocketAddrV6::new(core::net::Ipv6Addr::LOCALHOST, 80, 7, 9)
+        );
+        assert_archived_contract!(
+            rkyv_0_8::collections::btree_set::ArchivedBTreeSet<rkyv_0_8::rend::u32_le>,
+            BTreeSet::from([1u32, 2, 3])
+        );
+        assert_archived_contract!(
+            rkyv_0_8::collections::btree_map::ArchivedBTreeMap<
+                rkyv_0_8::rend::u32_le,
+                rkyv_0_8::rend::u64_le,
+            >,
+            BTreeMap::from([(1u32, 10u64), (2, 20)])
+        );
+        assert_archived_contract!(
+            rkyv_0_8::tuple::ArchivedTuple2<rkyv_0_8::rend::u32_le, rkyv_0_8::string::ArchivedString>,
+            (1u32, "x".to_string())
+        );
+        assert_archived_contract!(
+            rkyv_0_8::result::ArchivedResult<
+                rkyv_0_8::rend::u32_le,
+                rkyv_0_8::string::ArchivedString,
+            >,
+            Err::<u32, String>("bad".to_string())
+        );
+    }
+
+    #[cfg(feature = "ascii-1")]
+    #[test]
+    fn ascii_values_hash_like_the_text_they_compare_with() {
+        assert_contract!(&ascii_1::AsciiChar::A, &'A');
+        assert_contract!(ascii_1::AsciiStr::from_ascii("hi").unwrap(), "hi");
+
+        #[cfg(feature = "alloc")]
+        assert_contract!(&ascii_1::AsciiString::from_ascii("hi").unwrap(), "hi");
+    }
+
+    #[cfg(feature = "bytes-1")]
+    #[test]
+    fn byte_buffers_hash_like_the_slices_they_compare_with() {
+        assert_contract!(&bytes_1::Bytes::from_static(b"abc"), &b"abc"[..]);
+        assert_contract!(&bytes_1::BytesMut::from(&b"abc"[..]), &b"abc"[..]);
+    }
+
+    #[cfg(feature = "bstr-1")]
+    #[test]
+    fn byte_strings_hash_like_the_slices_they_compare_with() {
+        assert_contract!(bstr_1::BStr::new(b"abc"), &b"abc"[..]);
+    }
+
+    #[test]
+    fn wrappers_hash_their_inner_value() {
+        assert_eq!(bytes_of(&Portable(1u32)), bytes_of(&1u32));
+        assert_eq!(
+            bytes_of(&AssertPortable(1u32)),
+            bytes_of(&AssertPortable(1u32))
+        );
+        assert_eq!(bytes_of(&&1u32), bytes_of(&1u32));
+
+        // The standard `Hash` impl on `Portable` must route through `PortableHash`.
+        let mut via_std = Recorder::default();
+        core::hash::Hash::hash(&Portable(1u32), &mut via_std);
+
+        assert_eq!(via_std.0, bytes_of(&1u32));
+    }
+}

@@ -411,7 +411,7 @@ simple_repr!(|addr: &core::net::SocketAddrV6| -> core::net::SocketAddr { (*addr)
 self_repr!(core::net::SocketAddr);
 map_repr!([T: VisitPortableRepr] |val: &core::num::Saturating<T>| -> &T { &val.0 });
 map_repr!([T: VisitPortableRepr] |val: &core::num::Wrapping<T>| -> &T { &val.0 });
-map_repr!([T: VisitPortableRepr] |val: &core::cmp::Reverse<T>| -> &T { &val.0 });
+self_repr!(core::cmp::Reverse<T>);
 self_repr!(core::cmp::Ordering);
 map_repr!([P: core::ops::Deref<Target: VisitPortableRepr>] |val: &core::pin::Pin<P>| -> &P::Target { val });
 self_repr!(core::task::Poll<T>);
@@ -1186,3 +1186,147 @@ cfg_select!(feature = "either-1" => {
         }
     }
 } _ => {});
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        BoundRepr, OptionRepr, RangeRepr, ResultRepr, Tuple1Repr, Tuple2Repr, VisitPortableRepr,
+    };
+
+    use core::ops::Bound;
+
+    #[test]
+    fn option_repr_round_trips_unsized_values() {
+        OptionRepr::visit(Some("hello"), |repr| {
+            assert_eq!(repr.as_ref(), Some("hello"));
+        });
+        OptionRepr::<str>::visit(None, |repr| {
+            assert_eq!(repr.as_ref(), None);
+        });
+    }
+
+    #[test]
+    fn result_repr_round_trips_both_variants() {
+        let ok: Result<&u32, &str> = Ok(&1);
+        ResultRepr::visit(ok, |repr| assert_eq!(repr.as_ref(), Ok(&1)));
+
+        let err: Result<&u32, &str> = Err("bad");
+        ResultRepr::visit(err, |repr| assert_eq!(repr.as_ref(), Err("bad")));
+    }
+
+    #[test]
+    fn bound_repr_round_trips_all_variants() {
+        BoundRepr::visit(Bound::Included(&1u32), |repr| {
+            assert_eq!(repr.as_ref(), Bound::Included(&1));
+        });
+        BoundRepr::visit(Bound::Excluded(&1u32), |repr| {
+            assert_eq!(repr.as_ref(), Bound::Excluded(&1));
+        });
+        BoundRepr::<u32>::visit(Bound::Unbounded, |repr| {
+            assert_eq!(repr.as_ref(), Bound::Unbounded);
+        });
+    }
+
+    #[test]
+    fn tuple_repr_round_trips_unsized_elements() {
+        Tuple2Repr::<str, [u32]>::visit(("hi", &[1u32, 2][..]), |repr| {
+            let (text, values) = repr.as_ref();
+
+            assert_eq!(text, "hi");
+            assert_eq!(values, &[1, 2]);
+        });
+    }
+
+    #[test]
+    fn tuple_repr_round_trips_at_the_arity_bounds() {
+        (1u32,).visit_portable_repr(|repr: &Tuple1Repr<u32>| {
+            assert_eq!(*repr.as_ref().0, 1);
+        });
+
+        let widest = (
+            0u8, 1u8, 2u8, 3u8, 4u8, 5u8, 6u8, 7u8, 8u8, 9u8, 10u8, 11u8, 12u8, 13u8, 14u8, 15u8,
+        );
+
+        widest.visit_portable_repr(|repr| {
+            let elements = repr.as_ref();
+
+            assert_eq!(*elements.0, 0);
+            assert_eq!(*elements.7, 7);
+            assert_eq!(*elements.15, 15);
+        });
+    }
+
+    fn range_bounds<R>(range: R) -> (Bound<u32>, Bound<u32>)
+    where
+        R: VisitPortableRepr<Repr = RangeRepr<u32>>,
+    {
+        range.visit_portable_repr(|repr| {
+            let (start, end) = repr.as_ref();
+
+            (start.as_ref().cloned(), end.as_ref().cloned())
+        })
+    }
+
+    #[test]
+    fn every_range_kind_reports_its_bounds() {
+        assert_eq!(
+            range_bounds(1u32..3),
+            (Bound::Included(1), Bound::Excluded(3))
+        );
+        assert_eq!(
+            range_bounds(1u32..=3),
+            (Bound::Included(1), Bound::Included(3))
+        );
+        assert_eq!(range_bounds(1u32..), (Bound::Included(1), Bound::Unbounded));
+        assert_eq!(range_bounds(..3u32), (Bound::Unbounded, Bound::Excluded(3)));
+        assert_eq!(
+            range_bounds(..=3u32),
+            (Bound::Unbounded, Bound::Included(3))
+        );
+    }
+
+    #[test]
+    fn range_full_is_unbounded_at_both_ends() {
+        (..).visit_portable_repr(|repr: &RangeRepr<core::convert::Infallible>| {
+            let (start, end) = repr.as_ref();
+
+            assert!(matches!(start.as_ref(), Bound::Unbounded));
+            assert!(matches!(end.as_ref(), Bound::Unbounded));
+        });
+    }
+
+    #[test]
+    fn wrappers_forward_to_the_inner_representation() {
+        let value = core::num::NonZeroU32::new(7).unwrap();
+
+        assert_eq!(value.visit_portable_repr(|repr| *repr), 7u32);
+        assert_eq!(
+            crate::Portable(value).visit_portable_repr(|repr| *repr),
+            7u32
+        );
+        assert_eq!(
+            core::num::Wrapping(7u32).visit_portable_repr(|repr| *repr),
+            7u32
+        );
+        assert_eq!([1u32, 2, 3].visit_portable_repr(<[u32]>::len), 3);
+    }
+
+    #[cfg(feature = "triomphe-0_1")]
+    #[test]
+    fn arc_union_repr_round_trips_both_variants() {
+        use super::ArcUnionRepr;
+        use triomphe_0_1::{Arc, ArcUnion, ArcUnionBorrow};
+
+        let first = ArcUnion::<u32, u64>::from_first(Arc::new(1));
+        ArcUnionRepr::visit(first.borrow(), |repr| match repr.borrow() {
+            ArcUnionBorrow::First(value) => assert_eq!(*value.get(), 1),
+            ArcUnionBorrow::Second(_) => panic!("expected first"),
+        });
+
+        let second = ArcUnion::<u32, u64>::from_second(Arc::new(2));
+        ArcUnionRepr::visit(second.borrow(), |repr| match repr.borrow() {
+            ArcUnionBorrow::First(_) => panic!("expected second"),
+            ArcUnionBorrow::Second(value) => assert_eq!(*value.get(), 2),
+        });
+    }
+}

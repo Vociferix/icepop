@@ -89,7 +89,7 @@ where
     }
 }
 
-impl<K: PortableEq + PortableRepr + ?Sized> PortableReprEq<K> for core::convert::Infallible {
+impl<K: PortableRepr + ?Sized> PortableReprEq<K> for core::convert::Infallible {
     fn portable_repr_eq(&self, other: &K) -> bool {
         let _ = other;
         true
@@ -478,6 +478,25 @@ impl PortableReprEq<core::convert::Infallible> for core::marker::PhantomPinned {
     }
 }
 
+impl<T, U> PortableReprEq<core::cmp::Reverse<U>> for core::cmp::Reverse<T>
+where
+    T: PortableEq<U>,
+{
+    fn portable_repr_eq(&self, other: &core::cmp::Reverse<U>) -> bool {
+        self.0.portable_eq(&other.0)
+    }
+}
+
+impl<T> PortableReprEq<core::convert::Infallible> for core::cmp::Reverse<T>
+where
+    T: PortableEq,
+{
+    fn portable_repr_eq(&self, other: &core::convert::Infallible) -> bool {
+        let _ = other;
+        true
+    }
+}
+
 impl<T, U> PortableReprEq<core::task::Poll<U>> for core::task::Poll<T>
 where
     T: PortableEq<U>,
@@ -610,6 +629,53 @@ where
     }
 }
 
+#[cfg(feature = "triomphe-0_1")]
+impl<H1, T1, H2, T2> PortableReprEq<triomphe_0_1::HeaderSlice<H2, T2>>
+    for triomphe_0_1::HeaderSlice<H1, T1>
+where
+    H1: PortableEq<H2>,
+    T1: PortableEq<T2> + ?Sized,
+    T2: ?Sized,
+{
+    fn portable_repr_eq(&self, other: &triomphe_0_1::HeaderSlice<H2, T2>) -> bool {
+        self.header.portable_eq(&other.header) && self.slice.portable_eq(&other.slice)
+    }
+}
+
+#[cfg(feature = "triomphe-0_1")]
+impl<H, T> PortableReprEq<core::convert::Infallible> for triomphe_0_1::HeaderSlice<H, T>
+where
+    H: PortableEq,
+    T: PortableEq + ?Sized,
+{
+    fn portable_repr_eq(&self, other: &core::convert::Infallible) -> bool {
+        let _ = other;
+        true
+    }
+}
+
+#[cfg(feature = "triomphe-0_1")]
+impl<H1, H2> PortableReprEq<triomphe_0_1::HeaderWithLength<H2>>
+    for triomphe_0_1::HeaderWithLength<H1>
+where
+    H1: PortableEq<H2>,
+{
+    fn portable_repr_eq(&self, other: &triomphe_0_1::HeaderWithLength<H2>) -> bool {
+        self.header.portable_eq(&other.header) && self.length.portable_eq(&other.length)
+    }
+}
+
+#[cfg(feature = "triomphe-0_1")]
+impl<H> PortableReprEq<core::convert::Infallible> for triomphe_0_1::HeaderWithLength<H>
+where
+    H: PortableEq,
+{
+    fn portable_repr_eq(&self, other: &core::convert::Infallible) -> bool {
+        let _ = other;
+        true
+    }
+}
+
 #[cfg(feature = "either-1")]
 impl<L1, R1, L2, R2> PortableReprEq<either_1::Either<L2, R2>> for either_1::Either<L1, R1>
 where
@@ -636,5 +702,242 @@ where
     fn portable_repr_eq(&self, other: &core::convert::Infallible) -> bool {
         let _ = other;
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::PortableEq;
+
+    use crate::{AssertPortable, Portable};
+
+    #[test]
+    fn size_types_compare_against_every_width_they_may_be_stored_as() {
+        assert!(1usize.portable_eq(&1u16));
+        assert!(1usize.portable_eq(&1u32));
+        assert!(1usize.portable_eq(&1u64));
+        assert!(1u16.portable_eq(&1usize));
+        assert!(!1usize.portable_eq(&2u32));
+
+        assert!((-1isize).portable_eq(&-1i16));
+        assert!((-1isize).portable_eq(&-1i32));
+        assert!((-1isize).portable_eq(&-1i64));
+        assert!(!(-1isize).portable_eq(&1i64));
+
+        // Widening must sign-extend rather than reinterpret.
+        assert!(!(-1isize).portable_eq(&i16::MAX));
+        assert!((isize::from(i16::MIN)).portable_eq(&i16::MIN));
+    }
+
+    #[test]
+    fn slices_compare_element_wise_and_by_length() {
+        let slice: &[u32] = &[1, 2, 3];
+
+        assert!([1u32, 2, 3].portable_eq(slice));
+        assert!(!<[u32]>::portable_eq(&[1, 2][..], slice));
+        assert!(!<[u32]>::portable_eq(&[1, 2, 3, 4][..], slice));
+        assert!(!<[u32]>::portable_eq(&[1, 2, 4][..], slice));
+
+        // The element types only need a shared representation.
+        assert!([1usize, 2].portable_eq(&[1u64, 2][..]));
+    }
+
+    #[test]
+    fn empty_slices_of_unrelated_lengths_still_compare() {
+        let empty: &[u32] = &[];
+
+        assert!(empty.portable_eq(&[][..] as &[u32]));
+        assert!(!empty.portable_eq(&[1u32][..]));
+    }
+
+    #[test]
+    fn option_and_result_match_on_variant_before_value() {
+        assert!(Some(1usize).portable_eq(&Some(1u64)));
+        assert!(!Some(1usize).portable_eq(&Some(2u64)));
+        assert!(!Some(1usize).portable_eq(&None::<u64>));
+        assert!(None::<usize>.portable_eq(&None::<u64>));
+
+        assert!(Ok::<usize, u8>(1).portable_eq(&Ok::<u64, u8>(1)));
+        assert!(Err::<usize, u8>(1).portable_eq(&Err::<u64, u8>(1)));
+        assert!(!Ok::<usize, u8>(1).portable_eq(&Err::<u64, u8>(1)));
+    }
+
+    #[test]
+    fn bounds_match_on_variant_before_value() {
+        use core::ops::Bound::{Excluded, Included, Unbounded};
+
+        assert!(Included(1usize).portable_eq(&Included(1u64)));
+        assert!(!Included(1usize).portable_eq(&Excluded(1u64)));
+        assert!(!Included(1usize).portable_eq(&Unbounded::<u64>));
+        assert!(Unbounded::<usize>.portable_eq(&Unbounded::<u64>));
+    }
+
+    #[test]
+    fn ranges_compare_by_their_bounds_across_range_kinds() {
+        assert!((1u32..3).portable_eq(&(1u32..3)));
+        assert!(!(1u32..3).portable_eq(&(1u32..=3)));
+        assert!(!(1u32..3).portable_eq(&(1u32..4)));
+
+        // `RangeFull` is represented with `Infallible` bounds, so it compares against every
+        // other range kind without matching any bounded one.
+        assert!((..).portable_eq(&(..)));
+        assert!(!(1u32..3).portable_eq(&(..)));
+        assert!(!(1u32..).portable_eq(&(..)));
+        assert!(!(..3u32).portable_eq(&(..)));
+    }
+
+    #[test]
+    fn tuples_compare_element_wise() {
+        assert!((1usize, 2usize).portable_eq(&(1u64, 2u32)));
+        assert!(!(1usize, 2usize).portable_eq(&(1u64, 3u32)));
+        assert!(!(1usize, 2usize).portable_eq(&(9u64, 2u32)));
+        assert!(().portable_eq(&()));
+    }
+
+    #[test]
+    fn poll_matches_on_variant_before_value() {
+        use core::task::Poll::{Pending, Ready};
+
+        assert!(Ready(1usize).portable_eq(&Ready(1u64)));
+        assert!(!Ready(1usize).portable_eq(&Pending::<u64>));
+        assert!(Pending::<usize>.portable_eq(&Pending::<u64>));
+    }
+
+    #[test]
+    fn reverse_compares_its_inner_value() {
+        use core::cmp::Reverse;
+
+        assert!(Reverse(1usize).portable_eq(&Reverse(1u64)));
+        assert!(!Reverse(1usize).portable_eq(&Reverse(2u64)));
+    }
+
+    #[test]
+    fn portable_wrapper_bridges_std_equality_across_types() {
+        assert_eq!(Portable(1usize), Portable(1u64));
+        assert_ne!(Portable(1usize), Portable(2u64));
+        assert_eq!(Portable::from_ref("hi"), Portable::from_ref("hi"));
+    }
+
+    #[test]
+    fn assert_portable_defers_to_std_equality() {
+        assert!(AssertPortable("hi").portable_eq(&AssertPortable("hi")));
+        assert!(!AssertPortable("hi").portable_eq(&AssertPortable("ho")));
+    }
+
+    #[cfg(feature = "rend-0_5")]
+    #[test]
+    fn endian_aware_integers_compare_with_their_native_form() {
+        assert!(rend_0_5::u32_le::from_native(5).portable_eq(&5u32));
+        assert!(rend_0_5::u32_be::from_native(5).portable_eq(&5u32));
+        assert!(rend_0_5::u32_le::from_native(5).portable_eq(&rend_0_5::u32_be::from_native(5)));
+        assert!(!rend_0_5::u32_le::from_native(5).portable_eq(&6u32));
+        assert!(rend_0_5::u64_le::from_native(5).portable_eq(&5usize));
+    }
+
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn owned_sequences_compare_with_slices_and_their_own_kind() {
+        use alloc::collections::{BTreeSet, LinkedList, VecDeque};
+        use alloc::vec;
+
+        let slice: &[u32] = &[1, 2, 3];
+
+        assert!(vec![1u32, 2, 3].portable_eq(slice));
+        assert!(VecDeque::from(vec![1u32, 2, 3]).portable_eq(slice));
+        assert!(BTreeSet::from([1u32, 2, 3]).portable_eq(slice));
+        assert!(LinkedList::from([1u32, 2, 3]).portable_eq(slice));
+        assert!(slice.portable_eq(&VecDeque::from(vec![1u32, 2, 3])));
+
+        assert!(!VecDeque::from(vec![1u32, 2]).portable_eq(slice));
+        assert!(VecDeque::from(vec![1usize, 2, 3]).portable_eq(&VecDeque::from(vec![1u64, 2, 3])));
+
+        // A `VecDeque` that has wrapped around still compares in logical order.
+        let mut wrapped = VecDeque::with_capacity(4);
+        wrapped.push_back(3u32);
+        wrapped.push_front(2);
+        wrapped.push_front(1);
+        assert!(wrapped.portable_eq(slice));
+    }
+
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn maps_compare_with_pair_slices_and_their_own_kind() {
+        use alloc::collections::BTreeMap;
+
+        let entries: &[(u32, u64)] = &[(1, 10), (2, 20)];
+        let map = BTreeMap::from([(1u32, 10u64), (2, 20)]);
+
+        assert!(map.portable_eq(entries));
+        assert!(entries.portable_eq(&map));
+        assert!(map.portable_eq(&BTreeMap::from([(1usize, 10u64), (2, 20)])));
+
+        assert!(!map.portable_eq(&[(1u32, 10u64)][..]));
+        assert!(!map.portable_eq(&[(1u32, 10u64), (2, 99)][..]));
+        assert!(!map.portable_eq(&[(1u32, 10u64), (9, 20)][..]));
+    }
+
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn smart_pointers_compare_as_their_pointee() {
+        use alloc::boxed::Box;
+        use alloc::string::String;
+        use alloc::vec;
+
+        assert!(Box::new(1usize).portable_eq(&1u64));
+        assert!(String::from("hi").portable_eq("hi"));
+        assert!(vec![1u32, 2].portable_eq(&Box::new([1u32, 2])));
+    }
+
+    #[cfg(all(feature = "rkyv-0_8", feature = "alloc"))]
+    #[test]
+    fn archived_btrees_compare_with_their_native_counterparts() {
+        use alloc::collections::{BTreeMap, BTreeSet};
+
+        use rkyv_0_8::collections::btree_map::ArchivedBTreeMap;
+        use rkyv_0_8::collections::btree_set::ArchivedBTreeSet;
+        use rkyv_0_8::rancor::Error;
+        use rkyv_0_8::rend::{u32_le, u64_le};
+
+        let set = BTreeSet::from([1u32, 2, 3]);
+        let bytes = rkyv_0_8::to_bytes::<Error>(&set).unwrap();
+        // SAFETY: the bytes were just produced by `to_bytes` for this exact type.
+        let archived = unsafe { rkyv_0_8::access_unchecked::<ArchivedBTreeSet<u32_le>>(&bytes) };
+
+        assert!(archived.portable_eq(&set));
+        assert!(set.portable_eq(archived));
+        assert!(!archived.portable_eq(&BTreeSet::from([1u32, 2])));
+
+        let map = BTreeMap::from([(1u32, 10u64), (2, 20)]);
+        let bytes = rkyv_0_8::to_bytes::<Error>(&map).unwrap();
+        // SAFETY: the bytes were just produced by `to_bytes` for this exact type.
+        let archived =
+            unsafe { rkyv_0_8::access_unchecked::<ArchivedBTreeMap<u32_le, u64_le>>(&bytes) };
+
+        assert!(archived.portable_eq(&map));
+        assert!(map.portable_eq(archived));
+        assert!(!archived.portable_eq(&BTreeMap::from([(1u32, 10u64)])));
+    }
+
+    #[cfg(feature = "triomphe-0_1")]
+    #[test]
+    fn thin_arcs_compare_by_header_then_slice() {
+        use triomphe_0_1::ThinArc;
+
+        let arc = ThinArc::from_header_and_iter(1u32, [1u32, 2].into_iter());
+
+        assert!(arc.portable_eq(&ThinArc::from_header_and_iter(1u32, [1u32, 2].into_iter())));
+        assert!(!arc.portable_eq(&ThinArc::from_header_and_iter(9u32, [1u32, 2].into_iter())));
+        assert!(!arc.portable_eq(&ThinArc::from_header_and_iter(1u32, [1u32, 9].into_iter())));
+        assert!(!arc.portable_eq(&ThinArc::from_header_and_iter(1u32, [1u32].into_iter())));
+    }
+
+    #[cfg(feature = "either-1")]
+    #[test]
+    fn either_matches_on_side_before_value() {
+        use either_1::Either::{Left, Right};
+
+        assert!(Left::<usize, u8>(1).portable_eq(&Left::<u64, u8>(1)));
+        assert!(!Left::<usize, u8>(1).portable_eq(&Right::<u64, u8>(1)));
+        assert!(Right::<usize, u8>(1).portable_eq(&Right::<u64, u8>(1)));
     }
 }

@@ -494,3 +494,145 @@ impl From<DefaultHasherSeed> for ArchivedDefaultHasherSeed {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{DefaultHasher, DefaultHasherSeed};
+
+    use crate::hash::PortableHash;
+    use crate::hasher::PortableBuildHasher;
+
+    use core::hash::{BuildHasher, Hasher};
+
+    fn finish(state: impl FnOnce(&mut DefaultHasher)) -> u64 {
+        let mut hasher = DefaultHasherSeed::with_seed(42).build_hasher();
+        state(&mut hasher);
+        hasher.finish()
+    }
+
+    #[test]
+    fn a_seed_round_trips_through_its_value() {
+        assert_eq!(DefaultHasherSeed::with_seed(42).seed(), 42);
+    }
+
+    #[test]
+    fn equal_seeds_hash_equally_and_different_seeds_do_not() {
+        let seed = DefaultHasherSeed::new();
+        let same = DefaultHasherSeed::with_seed(seed.seed());
+
+        assert_eq!(
+            seed.portable_hash_one("hello"),
+            same.portable_hash_one("hello")
+        );
+        assert_ne!(
+            seed.portable_hash_one("hello"),
+            DefaultHasherSeed::with_seed(seed.seed().wrapping_add(1)).portable_hash_one("hello"),
+        );
+        assert_ne!(
+            seed.portable_hash_one("hello"),
+            seed.portable_hash_one("world")
+        );
+    }
+
+    #[test]
+    fn each_generated_seed_differs_from_the_last() {
+        let first = DefaultHasherSeed::new();
+        let second = DefaultHasherSeed::new();
+
+        assert_ne!(first.seed(), second.seed());
+    }
+
+    #[test]
+    fn integer_writes_are_normalized_to_their_portable_encoding() {
+        // A `Hasher` used directly must not reintroduce the platform's integer encoding.
+        assert_eq!(
+            finish(|state| state.write_u16(1)),
+            finish(|state| state.write_u64(1))
+        );
+        assert_eq!(
+            finish(|state| state.write_u32(1)),
+            finish(|state| state.write_usize(1))
+        );
+        assert_eq!(
+            finish(|state| state.write_i16(-1)),
+            finish(|state| state.write_i64(-1))
+        );
+        assert_eq!(
+            finish(|state| state.write_i32(-1)),
+            finish(|state| state.write_isize(-1))
+        );
+
+        assert_eq!(
+            finish(|state| state.write_u32(1)),
+            finish(|state| 1u32.portable_hash(state))
+        );
+        assert_ne!(
+            finish(|state| state.write_u32(1)),
+            finish(|state| state.write_u32(2))
+        );
+    }
+
+    #[cfg(feature = "rkyv-0_8")]
+    #[test]
+    fn an_archived_seed_builds_the_same_hasher_as_the_seed_it_came_from() {
+        use super::ArchivedDefaultHasherSeed;
+
+        let seed = DefaultHasherSeed::with_seed(42);
+        let archived = ArchivedDefaultHasherSeed::with_seed(42);
+
+        assert_eq!(archived.seed(), 42);
+        assert_eq!(
+            seed.portable_hash_one("hello"),
+            archived.portable_hash_one("hello")
+        );
+
+        assert_eq!(DefaultHasherSeed::from(archived).seed(), 42);
+        assert_eq!(ArchivedDefaultHasherSeed::from(seed).seed(), 42);
+    }
+
+    #[cfg(feature = "serde")]
+    mod serde {
+        use super::DefaultHasherSeed;
+
+        use ::serde::Deserialize;
+        use ::serde::de::value::{Error, MapDeserializer, SeqDeserializer};
+
+        fn from_map<'a>(
+            fields: impl IntoIterator<Item = (&'a str, u64)>,
+        ) -> Result<DefaultHasherSeed, Error> {
+            DefaultHasherSeed::deserialize(MapDeserializer::<_, Error>::new(fields.into_iter()))
+        }
+
+        #[test]
+        fn a_seed_deserializes_from_a_map() {
+            assert_eq!(from_map([("seed", 42u64)]).unwrap().seed(), 42);
+        }
+
+        #[test]
+        fn the_field_name_is_matched_ignoring_case() {
+            assert_eq!(from_map([("SEED", 42u64)]).unwrap().seed(), 42);
+        }
+
+        #[test]
+        fn a_seed_deserializes_from_a_sequence() {
+            let values = SeqDeserializer::<_, Error>::new([42u64].into_iter());
+
+            assert_eq!(DefaultHasherSeed::deserialize(values).unwrap().seed(), 42);
+        }
+
+        #[test]
+        fn an_unknown_field_is_rejected() {
+            assert!(from_map([("other", 42u64)]).is_err());
+        }
+
+        #[test]
+        fn a_missing_field_is_rejected() {
+            assert!(from_map([]).is_err());
+        }
+
+        #[test]
+        fn a_duplicated_field_is_rejected() {
+            assert!(from_map([("seed", 42u64), ("seed", 43)]).is_err());
+        }
+    }
+}
