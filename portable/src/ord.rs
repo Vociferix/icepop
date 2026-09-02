@@ -5,6 +5,9 @@ use super::repr::{self, PortableRepr, VisitPortableRepr};
 
 use core::cmp::Ordering;
 
+#[cfg(feature = "derive")]
+pub use portable_derive::PortableReprOrd;
+
 /// Ordering that gives the same answer on every platform, across types.
 ///
 /// Blanket-implemented for every [`VisitPortableRepr`] type whose representation implements

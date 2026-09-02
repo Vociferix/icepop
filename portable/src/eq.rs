@@ -2,6 +2,9 @@
 
 use super::repr::{self, PortableRepr, VisitPortableRepr};
 
+#[cfg(feature = "derive")]
+pub use portable_derive::PortableReprEq;
+
 /// Equality that gives the same answer on every platform, across types.
 ///
 /// Blanket-implemented for every [`VisitPortableRepr`] type whose representation implements

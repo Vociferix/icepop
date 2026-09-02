@@ -8,6 +8,7 @@ rustdoc-args = ["--cfg", "docsrs"]
 all-features = true
 
 [dependencies]
+portable-derive = { path = "../portable-derive", optional = true }
 arrayvec-0_7 = { version = "0.7", package = "arrayvec", default-features = false, optional = true }
 bytes-1 = { version = "1", package = "bytes", default-features = false, optional = true }
 const-random = { version = "0.1", optional = true }
@@ -32,6 +33,7 @@ either-1 = { version = "1", package = "either", default-features = false, option
 
 [features]
 default = ["alloc", "default-hasher", "getrandom"]
+derive = ["dep:portable-derive"]
 alloc = ["rkyv-0_8?/alloc", "tinyvec-1?/alloc", "bstr-1?/alloc", "ascii-1?/alloc"]
 default-hasher = ["dep:const-random", "dep:rapidhash"]
 getrandom = ["dep:getrandom"]

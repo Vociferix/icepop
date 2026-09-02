@@ -21,6 +21,7 @@ members = [
   "icepop-phf",
   "icepop-trie",
   "portable",
+  "portable-derive",
 ]
 
 [workspace.lints.clippy]

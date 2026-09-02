@@ -3,6 +3,9 @@
 use core::hash::Hasher;
 use core::ops::RangeBounds;
 
+#[cfg(feature = "derive")]
+pub use portable_derive::PortableHash;
+
 /// A type that can be hashed identically on every platform.
 ///
 /// Unlike [`Hash`](core::hash::Hash), implementations must write the same bytes regardless of

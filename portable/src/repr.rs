@@ -12,6 +12,9 @@ use super::Portable;
 
 use core::ptr::NonNull;
 
+#[cfg(feature = "derive")]
+pub use portable_derive::VisitPortableRepr;
+
 /// Names a type's portable representation and lends out a view of it.
 ///
 /// Implementing this trait is all a type needs in order to gain
