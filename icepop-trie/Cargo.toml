@@ -8,3 +8,6 @@ rustdoc-args = ["--cfg", "docsrs"]
 all-features = true
 
 [dependencies]
+
+[lints]
+workspace = true

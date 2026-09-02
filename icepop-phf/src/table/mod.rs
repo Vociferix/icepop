@@ -95,6 +95,7 @@ where
     ///
     /// `index` must be less than [`len`](Self::len).
     pub unsafe fn index_unchecked(&self, index: usize) -> &O::Entry {
+        // SAFETY: the caller guarantees `index` is within the entry array.
         unsafe { self.entries.get_unchecked(index) }
     }
 
@@ -102,6 +103,7 @@ where
     ///
     /// `index` must be less than [`len`](Self::len).
     pub unsafe fn index_unchecked_mut(&mut self, index: usize) -> &mut O::Entry {
+        // SAFETY: the caller guarantees `index` is within the entry array.
         unsafe { self.entries.get_unchecked_mut(index) }
     }
 }
@@ -122,6 +124,7 @@ where
     ///
     /// `index` must be less than [`len`](Self::len).
     pub unsafe fn map_index_unchecked(&self, index: usize) -> (&K, &V) {
+        // SAFETY: `index_unchecked` has this function's contract, which the caller upheld.
         let (k, v) = unsafe { self.index_unchecked(index) };
         (k, v)
     }
@@ -130,6 +133,7 @@ where
     ///
     /// `index` must be less than [`len`](Self::len).
     pub unsafe fn map_index_unchecked_mut(&mut self, index: usize) -> (&K, &mut V) {
+        // SAFETY: `index_unchecked_mut` has this function's contract, which the caller upheld.
         let (k, v) = unsafe { self.index_unchecked_mut(index) };
         (&*k, v)
     }
@@ -156,6 +160,8 @@ where
         Q: HashOps<S, P> + EqOps<O::Key, P> + ?Sized,
     {
         let modulus = self.entries.len() as u64;
+        // SAFETY: the caller guarantees the table is not empty. Stating that here is what lets the
+        // two reductions below compile without a division-by-zero check.
         unsafe {
             core::hint::assert_unchecked(modulus != 0);
         }
@@ -165,10 +171,14 @@ where
         HashOps::<S, P>::hash(&self.global_param, &mut hasher);
         key.hash(&mut hasher);
         let param_idx = (hasher.finish() % modulus) as usize;
+        // SAFETY: `param_idx` is a remainder modulo the entry count, and `params` holds exactly
+        // that many elements.
         let param = unsafe { *self.params.get_unchecked(param_idx) };
 
         HashOps::<S, P>::hash(&param, &mut hasher);
         let index_idx = (hasher.finish() % modulus) as usize;
+        // SAFETY: `index_idx` is a remainder modulo the entry count, which is the bound `get_index`
+        // requires of a slot.
         unsafe { O::get_index(&self.indices, index_idx) }
     }
 
@@ -180,7 +190,9 @@ where
             return None;
         }
 
+        // SAFETY: the early return above establishes that the table is not empty.
         let index = unsafe { self.get_index_unchecked(key) };
+        // SAFETY: `get_index_unchecked` resolves to an index within the entry array.
         let entry = unsafe { self.entries.get_unchecked(index) };
         key.eq(O::get_key(entry)).then_some(index)
     }
@@ -193,7 +205,9 @@ where
             return false;
         }
 
+        // SAFETY: the early return above establishes that the table is not empty.
         let index = unsafe { self.get_index_unchecked(key) };
+        // SAFETY: `get_index_unchecked` resolves to an index within the entry array.
         let entry = unsafe { self.entries.get_unchecked(index) };
         key.eq(O::get_key(entry))
     }
@@ -206,7 +220,9 @@ where
             return None;
         }
 
+        // SAFETY: the early return above establishes that the table is not empty.
         let index = unsafe { self.get_index_unchecked(key) };
+        // SAFETY: `get_index_unchecked` resolves to an index within the entry array.
         let entry = unsafe { self.entries.get_unchecked(index) };
         key.eq(O::get_key(entry)).then_some(entry)
     }
@@ -219,7 +235,9 @@ where
             return None;
         }
 
+        // SAFETY: the early return above establishes that the table is not empty.
         let index = unsafe { self.get_index_unchecked(key) };
+        // SAFETY: `get_index_unchecked` resolves to an index within the entry array.
         let entry = unsafe { self.entries.get_unchecked_mut(index) };
         key.eq(O::get_key(entry)).then_some(entry)
     }
@@ -231,7 +249,9 @@ where
     where
         Q: HashOps<S, P> + EqOps<O::Key, P> + ?Sized,
     {
+        // SAFETY: `get_index_unchecked` has this function's contract, which the caller upheld.
         let idx = unsafe { self.get_index_unchecked(key) };
+        // SAFETY: `get_index_unchecked` resolves to an index within the entry array.
         unsafe { self.entries.get_unchecked(idx) }
     }
 
@@ -242,7 +262,9 @@ where
     where
         Q: HashOps<S, P> + EqOps<O::Key, P> + ?Sized,
     {
+        // SAFETY: `get_index_unchecked` has this function's contract, which the caller upheld.
         let idx = unsafe { self.get_index_unchecked(key) };
+        // SAFETY: `get_index_unchecked` resolves to an index within the entry array.
         unsafe { self.entries.get_unchecked_mut(idx) }
     }
 }
@@ -291,6 +313,7 @@ where
     where
         Q: HashOps<S, P> + EqOps<K, P> + ?Sized,
     {
+        // SAFETY: `get_unchecked` has this function's contract, which the caller upheld.
         let (k, v) = unsafe { self.get_unchecked(key) };
         (k, v)
     }
@@ -302,6 +325,7 @@ where
     where
         Q: HashOps<S, P> + EqOps<K, P> + ?Sized,
     {
+        // SAFETY: `get_unchecked_mut` has this function's contract, which the caller upheld.
         let (k, v) = unsafe { self.get_unchecked_mut(key) };
         (&*k, v)
     }
@@ -314,6 +338,7 @@ where
         Q: HashOps<S, P> + EqOps<K, P> + ?Sized,
         K: 'a,
     {
+        // SAFETY: `get_unchecked` has this function's contract, which the caller upheld.
         &unsafe { self.get_unchecked(key) }.1
     }
 
@@ -325,6 +350,7 @@ where
         Q: HashOps<S, P> + EqOps<K, P> + ?Sized,
         K: 'a,
     {
+        // SAFETY: `get_unchecked_mut` has this function's contract, which the caller upheld.
         &mut unsafe { self.get_unchecked_mut(key) }.1
     }
 
@@ -343,6 +369,8 @@ where
         assert!(unique_indices(&indices), "duplicate key found");
         indices.map(|idx| {
             idx.map(|idx| {
+                // SAFETY: `idx` came from `get_index`, so it is within the entry array, and the
+                // assert above rules out two keys sharing one, so no two borrows alias.
                 let (k, v) = unsafe { &mut *self.entries.as_mut_ptr().add(idx) };
                 (&*k, v)
             })
@@ -362,6 +390,8 @@ where
     {
         let indices = keys.map(|key| self.get_index(key));
         assert!(unique_indices(&indices), "duplicate key found");
+        // SAFETY: each `idx` came from `get_index`, so it is within the entry array, and the assert
+        // above rules out two keys sharing one, so no two borrows alias.
         indices.map(|idx| idx.map(|idx| unsafe { &mut (*self.entries.as_mut_ptr().add(idx)).1 }))
     }
 
@@ -378,6 +408,8 @@ where
     {
         keys.map(|key| {
             self.get_index(key).map(|idx| {
+                // SAFETY: `idx` came from `get_index`, so it is within the entry array, and the
+                // caller guarantees no two keys share an entry, so no two borrows alias.
                 let (k, v) = unsafe { &mut *self.entries.as_mut_ptr().add(idx) };
                 (&*k, v)
             })
@@ -396,6 +428,8 @@ where
         K: 'a,
     {
         keys.map(|key| {
+            // SAFETY: `idx` came from `get_index`, so it is within the entry array, and the caller
+            // guarantees no two keys share an entry, so no two borrows alias.
             self.get_index(key)
                 .map(|idx| unsafe { &mut (*self.entries.as_mut_ptr().add(idx)).1 })
         })

@@ -107,6 +107,8 @@ where
     where
         Q: PortableHash + PortableEq<K> + ?Sized,
     {
+        // SAFETY: `Table::get_index_unchecked` has this function's contract, which the caller
+        // upheld.
         unsafe { self.table.get_index_unchecked(key) }
     }
 
@@ -258,6 +260,8 @@ where
     where
         Q: PortableHash + PortableEq<K> + ?Sized,
     {
+        // SAFETY: `Table::map_get_key_value_unchecked` has this function's contract, which the
+        // caller upheld.
         unsafe { self.table.map_get_key_value_unchecked(key) }
     }
 
@@ -286,6 +290,8 @@ where
     where
         Q: PortableHash + PortableEq<K> + ?Sized,
     {
+        // SAFETY: `Table::map_get_key_value_unchecked_mut` has this function's contract, which the
+        // caller upheld.
         unsafe { self.table.map_get_key_value_unchecked_mut(key) }
     }
 
@@ -311,6 +317,7 @@ where
     where
         Q: PortableHash + PortableEq<K> + ?Sized,
     {
+        // SAFETY: `Table::map_get_unchecked` has this function's contract, which the caller upheld.
         unsafe { self.table.map_get_unchecked(key) }
     }
 
@@ -339,6 +346,8 @@ where
     where
         Q: PortableHash + PortableEq<K> + ?Sized,
     {
+        // SAFETY: `Table::map_get_unchecked_mut` has this function's contract, which the caller
+        // upheld.
         unsafe { self.table.map_get_unchecked_mut(key) }
     }
 
@@ -429,6 +438,8 @@ where
     where
         Q: PortableHash + PortableEq<K> + ?Sized,
     {
+        // SAFETY: `Table::map_get_disjoint_key_value_unchecked_mut` has this function's contract,
+        // which the caller upheld.
         unsafe { self.table.map_get_disjoint_key_value_unchecked_mut(keys) }
     }
 
@@ -459,6 +470,8 @@ where
     where
         Q: PortableHash + PortableEq<K> + ?Sized,
     {
+        // SAFETY: `Table::map_get_disjoint_unchecked_mut` has this function's contract, which the
+        // caller upheld.
         unsafe { self.table.map_get_disjoint_unchecked_mut(keys) }
     }
 }

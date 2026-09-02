@@ -216,6 +216,8 @@ impl<K, V> TableOps for OrderedMapOps<K, V> {
     }
 
     unsafe fn get_index(indices: &Self::Indices, slot: usize) -> usize {
+        // SAFETY: the caller guarantees `slot` is less than the entry count, and an ordered table's
+        // index array is exactly that long.
         (unsafe { *indices.get_unchecked(slot) }) as usize
     }
 
@@ -234,6 +236,8 @@ impl<K, V> TableOps for OrderedMapOps<K, V> {
         Self::Key: rkyv::Archive,
         Self::Value: rkyv::Archive + 'a,
     {
+        // SAFETY: `Self::Entry` is `(K, V)`, and rkyv archives a pair as `ArchivedTuple2`, so
+        // source and target are the same type; the associated type hides that from the compiler.
         let entry: &'a rkyv::tuple::ArchivedTuple2<
             rkyv::Archived<Self::Key>,
             rkyv::Archived<Self::Value>,
@@ -246,6 +250,8 @@ impl<K, V> TableOps for OrderedMapOps<K, V> {
     where
         Self::Indices: rkyv::Archive,
     {
+        // SAFETY: the caller guarantees `slot` is less than the entry count, and an ordered table's
+        // index array is exactly that long.
         (unsafe { *indices.get_unchecked(slot) }).to_native() as usize
     }
 
@@ -304,6 +310,8 @@ impl<K, V> TableOps for MapOps<K, V> {
         Self::Key: rkyv::Archive,
         Self::Value: rkyv::Archive + 'a,
     {
+        // SAFETY: `Self::Entry` is `(K, V)`, and rkyv archives a pair as `ArchivedTuple2`, so
+        // source and target are the same type; the associated type hides that from the compiler.
         let entry: &'a rkyv::tuple::ArchivedTuple2<
             rkyv::Archived<Self::Key>,
             rkyv::Archived<Self::Value>,
@@ -354,6 +362,8 @@ impl<T> TableOps for OrderedSetOps<T> {
     }
 
     unsafe fn get_index(indices: &Self::Indices, slot: usize) -> usize {
+        // SAFETY: the caller guarantees `slot` is less than the entry count, and an ordered table's
+        // index array is exactly that long.
         (unsafe { *indices.get_unchecked(slot) }) as usize
     }
 
@@ -380,6 +390,8 @@ impl<T> TableOps for OrderedSetOps<T> {
     where
         Self::Indices: rkyv::Archive,
     {
+        // SAFETY: the caller guarantees `slot` is less than the entry count, and an ordered table's
+        // index array is exactly that long.
         (unsafe { *indices.get_unchecked(slot) }).to_native() as usize
     }
 

@@ -52,6 +52,8 @@ where
 
     fn resolve(&self, resolver: Self::Resolver, out: rkyv::Place<Self::Archived>) {
         self.table
+            // SAFETY: the archived type is `repr(transparent)` over the archived table, so a place
+            // for one is a valid place for the other.
             .resolve(resolver.table, unsafe { out.cast_unchecked() });
     }
 }
@@ -99,6 +101,8 @@ where
     S: Archive,
 {
     fn table_seal(this: Seal<'_, Self>) -> Seal<'_, ArchivedTable<OrderedMapOps<K, V>, S>> {
+        // SAFETY: the archived type is `repr(transparent)` over its `table` field, so resealing
+        // that field grants exactly the capability the original seal did.
         Seal::new(unsafe { &mut Seal::unseal_unchecked(this).table })
     }
 
@@ -207,6 +211,8 @@ where
     /// ```
     pub fn iter_seal(this: Seal<'_, Self>) -> IterSeal<'_, K, V> {
         IterSeal {
+            // SAFETY: `iter_mut` requires that keys are never written. The iterator built from it
+            // yields keys by shared reference and values sealed, so no key is reachable mutably.
             iter: unsafe { ArchivedTable::iter_mut(Self::table_seal(this)) },
         }
     }
@@ -275,6 +281,8 @@ where
     /// ```
     pub fn values_seal(this: Seal<'_, Self>) -> ValuesSeal<'_, K, V> {
         ValuesSeal {
+            // SAFETY: `iter_mut` requires that keys are never written. The iterator built from it
+            // yields keys by shared reference and values sealed, so no key is reachable mutably.
             iter: unsafe { ArchivedTable::iter_mut(Self::table_seal(this)) },
         }
     }
@@ -368,6 +376,8 @@ where
     /// # Ok::<(), Error>(())
     /// ```
     pub unsafe fn index_unchecked(&self, index: usize) -> (&Archived<K>, &Archived<V>) {
+        // SAFETY: `Table::map_index_unchecked` has this function's contract, which the caller
+        // upheld.
         unsafe { self.table.map_index_unchecked(index) }
     }
 
@@ -399,6 +409,8 @@ where
         this: Seal<'_, Self>,
         index: usize,
     ) -> (&Archived<K>, Seal<'_, Archived<V>>) {
+        // SAFETY: `ArchivedTable::map_index_unchecked_seal` has this function's contract, which the
+        // caller upheld.
         unsafe { ArchivedTable::map_index_unchecked_seal(Self::table_seal(this), index) }
     }
 }
@@ -439,6 +451,8 @@ where
     where
         Q: PortableHash + PortableEq<Archived<K>> + ?Sized,
     {
+        // SAFETY: `Table::get_index_unchecked` has this function's contract, which the caller
+        // upheld.
         unsafe { self.table.get_index_unchecked(key) }
     }
 
@@ -622,6 +636,8 @@ where
     where
         Q: PortableHash + PortableEq<Archived<K>> + ?Sized,
     {
+        // SAFETY: `Table::map_get_key_value_unchecked` has this function's contract, which the
+        // caller upheld.
         unsafe { self.table.map_get_key_value_unchecked(key) }
     }
 
@@ -659,6 +675,8 @@ where
     where
         Q: PortableHash + PortableEq<Archived<K>> + ?Sized,
     {
+        // SAFETY: `ArchivedTable::map_get_key_value_unchecked_seal` has this function's contract,
+        // which the caller upheld.
         unsafe { ArchivedTable::map_get_key_value_unchecked_seal(Self::table_seal(this), key) }
     }
 
@@ -688,6 +706,7 @@ where
     where
         Q: PortableHash + PortableEq<Archived<K>> + ?Sized,
     {
+        // SAFETY: `Table::map_get_unchecked` has this function's contract, which the caller upheld.
         unsafe { self.table.map_get_unchecked(key) }
     }
 
@@ -722,6 +741,8 @@ where
     where
         Q: PortableHash + PortableEq<Archived<K>> + ?Sized,
     {
+        // SAFETY: `ArchivedTable::map_get_unchecked_seal` has this function's contract, which the
+        // caller upheld.
         unsafe { ArchivedTable::map_get_unchecked_seal(Self::table_seal(this), key) }
     }
 
@@ -833,6 +854,8 @@ where
     where
         Q: PortableHash + PortableEq<Archived<K>> + ?Sized,
     {
+        // SAFETY: `ArchivedTable::map_get_disjoint_key_value_unchecked_seal` has this function's
+        // contract, which the caller upheld.
         unsafe {
             ArchivedTable::map_get_disjoint_key_value_unchecked_seal(Self::table_seal(this), keys)
         }
@@ -871,6 +894,8 @@ where
     where
         Q: PortableHash + PortableEq<Archived<K>> + ?Sized,
     {
+        // SAFETY: `ArchivedTable::map_get_disjoint_unchecked_seal` has this function's contract,
+        // which the caller upheld.
         unsafe { ArchivedTable::map_get_disjoint_unchecked_seal(Self::table_seal(this), keys) }
     }
 }

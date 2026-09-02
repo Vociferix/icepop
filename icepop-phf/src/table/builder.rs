@@ -241,6 +241,9 @@ where
             Entry::Occupied(entry) => {
                 let idx = entry.get().0 as usize;
 
+                // SAFETY: `idx` was read from the index table, which only ever holds indices of
+                // entries currently in `entries`, so it is in bounds; stating that lets the access
+                // below skip a bounds check.
                 unsafe {
                     core::hint::assert_unchecked(idx < entries.len());
                 }
@@ -488,6 +491,9 @@ where
                 let (idx, h) = entry.remove().0;
                 let idx = idx as usize;
 
+                // SAFETY: `idx` was read from the index table, which only ever holds indices of
+                // entries currently in `entries`, so it is in bounds; stating that lets the access
+                // below skip a bounds check.
                 unsafe { core::hint::assert_unchecked(idx < entries.len()) }
                 let v = entries.swap_remove(idx).1;
 

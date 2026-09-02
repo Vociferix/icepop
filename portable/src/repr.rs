@@ -1109,14 +1109,15 @@ cfg_select!(feature = "triomphe-0_1" => {
         pub fn borrow(&self) -> triomphe_0_1::ArcUnionBorrow<'_, A, B> {
             use triomphe_0_1::ArcUnionBorrow::{First, Second};
 
-            // SAFETY: `ArcBorrow` is `repr(transparent)` over `NonNull<T>`, and the pointers
-            // are only ever set by `visit` from a live `ArcBorrow`, which keeps the value
-            // alive for as long as the `Self` it builds is lent out. The returned borrow is
-            // tied to `&self`, so it cannot outlive that.
             match &self.0 {
+                // SAFETY: `ArcBorrow` is `repr(transparent)` over `NonNull<T>`, and the pointers
+                // are only ever set by `visit` from a live `ArcBorrow`, which keeps the value
+                // alive for as long as the `Self` it builds is lent out. The returned borrow is
+                // tied to `&self`, so it cannot outlive that.
                 ArcUnionReprInner::First(a) => First(unsafe {
                     core::mem::transmute::<NonNull<A>, triomphe_0_1::ArcBorrow<'_, A>>(*a)
                 }),
+                // SAFETY: as above, for the other variant.
                 ArcUnionReprInner::Second(b) => Second(unsafe {
                     core::mem::transmute::<NonNull<B>, triomphe_0_1::ArcBorrow<'_, B>>(*b)
                 }),

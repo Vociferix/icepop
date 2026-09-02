@@ -352,6 +352,8 @@ impl<K, V, S, P> OrderedMap<K, V, S, P> {
     /// assert_eq!(unsafe { map.index_unchecked(index) }, (&"a", &1));
     /// ```
     pub unsafe fn index_unchecked(&self, index: usize) -> (&K, &V) {
+        // SAFETY: `Table::map_index_unchecked` has this function's contract, which the caller
+        // upheld.
         unsafe { self.table.map_index_unchecked(index) }
     }
 
@@ -375,6 +377,8 @@ impl<K, V, S, P> OrderedMap<K, V, S, P> {
     /// assert_eq!(map.get("a"), Some(&9));
     /// ```
     pub unsafe fn index_unchecked_mut(&mut self, index: usize) -> (&K, &mut V) {
+        // SAFETY: `Table::map_index_unchecked_mut` has this function's contract, which the caller
+        // upheld.
         unsafe { self.table.map_index_unchecked_mut(index) }
     }
 }

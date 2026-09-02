@@ -102,6 +102,8 @@ where
     where
         Q: PortableHash + PortableEq<T> + ?Sized,
     {
+        // SAFETY: `Table::get_index_unchecked` has this function's contract, which the caller
+        // upheld.
         unsafe { self.table.get_index_unchecked(key) }
     }
 
@@ -189,6 +191,7 @@ where
     where
         Q: PortableHash + PortableEq<T> + ?Sized,
     {
+        // SAFETY: `Table::get_unchecked` has this function's contract, which the caller upheld.
         unsafe { self.table.get_unchecked(key) }
     }
 }

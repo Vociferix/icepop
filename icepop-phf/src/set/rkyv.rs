@@ -73,6 +73,8 @@ where
 
     fn resolve(&self, resolver: Self::Resolver, out: rkyv::Place<Self::Archived>) {
         self.table
+            // SAFETY: the archived type is `repr(transparent)` over the archived table, so a place
+            // for one is a valid place for the other.
             .resolve(resolver.table, unsafe { out.cast_unchecked() })
     }
 }
@@ -258,6 +260,7 @@ where
     /// # Ok::<(), Error>(())
     /// ```
     pub unsafe fn index_unchecked(&self, index: usize) -> &Archived<T> {
+        // SAFETY: `Table::index_unchecked` has this function's contract, which the caller upheld.
         unsafe { self.table.index_unchecked(index) }
     }
 }
@@ -297,6 +300,8 @@ where
     where
         Q: PortableHash + PortableEq<Archived<T>> + ?Sized,
     {
+        // SAFETY: `Table::get_index_unchecked` has this function's contract, which the caller
+        // upheld.
         unsafe { self.table.get_index_unchecked(key) }
     }
 
@@ -400,6 +405,7 @@ where
     where
         Q: PortableHash + PortableEq<Archived<T>> + ?Sized,
     {
+        // SAFETY: `Table::get_unchecked` has this function's contract, which the caller upheld.
         unsafe { self.table.get_unchecked(key) }
     }
 }

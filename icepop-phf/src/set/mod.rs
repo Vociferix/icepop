@@ -225,6 +225,7 @@ impl<T, S, P> Set<T, S, P> {
     /// assert_eq!(unsafe { set.index_unchecked(index) }, &20);
     /// ```
     pub unsafe fn index_unchecked(&self, index: usize) -> &T {
+        // SAFETY: `Table::index_unchecked` has this function's contract, which the caller upheld.
         unsafe { self.table.index_unchecked(index) }
     }
 }

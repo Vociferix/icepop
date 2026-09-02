@@ -19,3 +19,6 @@ default = ["getrandom"]
 serde = ["dep:serde", "portable/serde"]
 rkyv = ["dep:rkyv", "portable/rkyv-0_8"]
 getrandom = ["portable/getrandom"]
+
+[lints]
+workspace = true

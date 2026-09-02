@@ -12,6 +12,9 @@ icepop-filter = { path = "icepop-filter" }
 icepop-phf = { path = "icepop-phf" }
 icepop-trie = { path = "icepop-trie" }
 
+[lints]
+workspace = true
+
 [workspace]
 members = [
   "icepop-filter",
@@ -19,3 +22,7 @@ members = [
   "icepop-trie",
   "portable",
 ]
+
+[workspace.lints.clippy]
+missing_safety_doc = "warn"
+undocumented_unsafe_blocks = "warn"

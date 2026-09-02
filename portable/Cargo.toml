@@ -80,3 +80,5 @@ __all = [
   "triomphe-0_1",
 ]
 
+[lints]
+workspace = true

@@ -52,13 +52,16 @@ where
     O::Indices: Archive,
     S: Archive,
 {
-    params: Resolver<Box<[u8]>>,
+    params: Resolver<Box<[u32]>>,
     indices: Resolver<O::Indices>,
     entries: Resolver<Box<[O::Entry]>>,
     hasher_builder: Resolver<S>,
     global_param: Resolver<u8>,
 }
 
+// SAFETY: `verify` checks exactly the invariants the unchecked accessors rely on — that the
+// arrays agree in length and that every index is in bounds — and returns an error rather
+// than accepting an archive that violates them.
 unsafe impl<C, O, S> Verify<C> for ArchivedTable<O, S>
 where
     C: Fallible + ?Sized,
@@ -109,24 +112,40 @@ where
             global_param: global_param_res,
         } = resolver;
 
+        // SAFETY: `out` is a valid place for `Self`, so projecting to its `params` field stays
+        // inside that allocation; the pointer is not dereferenced here.
         let params_ptr = unsafe { &raw mut (*out.ptr()).params };
+        // SAFETY: `params_ptr` was just projected out of `out`, so it names that field of it.
         let params = unsafe { Place::from_field_unchecked(out, params_ptr) };
         self.params.resolve(params_res, params);
 
+        // SAFETY: `out` is a valid place for `Self`, so projecting to its `indices` field stays
+        // inside that allocation; the pointer is not dereferenced here.
         let indices_ptr = unsafe { &raw mut (*out.ptr()).indices };
+        // SAFETY: `indices_ptr` was just projected out of `out`, so it names that field of it.
         let indices = unsafe { Place::from_field_unchecked(out, indices_ptr) };
         self.indices.resolve(indices_res, indices);
 
+        // SAFETY: `out` is a valid place for `Self`, so projecting to its `entries` field stays
+        // inside that allocation; the pointer is not dereferenced here.
         let entries_ptr = unsafe { &raw mut (*out.ptr()).entries };
+        // SAFETY: `entries_ptr` was just projected out of `out`, so it names that field of it.
         let entries = unsafe { Place::from_field_unchecked(out, entries_ptr) };
         self.entries.resolve(entries_res, entries);
 
+        // SAFETY: `out` is a valid place for `Self`, so projecting to its `hasher_builder` field
+        // stays inside that allocation; the pointer is not dereferenced here.
         let hasher_builder_ptr = unsafe { &raw mut (*out.ptr()).hasher_builder };
+        // SAFETY: `hasher_builder_ptr` was just projected out of `out`, so it names that field of
+        // it.
         let hasher_builder = unsafe { Place::from_field_unchecked(out, hasher_builder_ptr) };
         self.hasher_builder
             .resolve(hasher_builder_res, hasher_builder);
 
+        // SAFETY: `out` is a valid place for `Self`, so projecting to its `global_param` field
+        // stays inside that allocation; the pointer is not dereferenced here.
         let global_param_ptr = unsafe { &raw mut (*out.ptr()).global_param };
+        // SAFETY: `global_param_ptr` was just projected out of `out`, so it names that field of it.
         let global_param = unsafe { Place::from_field_unchecked(out, global_param_ptr) };
         self.global_param.resolve(global_param_res, global_param);
     }
@@ -216,6 +235,8 @@ where
     pub unsafe fn iter_mut(
         this: rkyv::seal::Seal<'_, Self>,
     ) -> core::slice::IterMut<'_, Archived<O::Entry>> {
+        // SAFETY: the caller guarantees keys are left untouched, which is what `entries_seal`
+        // requires; this function forwards that same obligation to its own caller.
         unsafe { Self::entries_seal(this) }.iter_mut()
     }
 
@@ -227,14 +248,21 @@ where
     ///
     /// # Safety
     ///
-    /// The returned slice exposes whole entries, keys included. Nothing may be written through
-    /// it but values: a key that no longer hashes to its slot leaves the table unable to find
-    /// its own entries. Callers that hand any of this out publicly must reduce it to values
-    /// first, which is what the `*_seal` methods do.
+    /// The returned slice exposes whole entries, keys included, as plain references. That
+    /// escapes the protection a [`Seal`](rkyv::seal::Seal) gives, under which rkyv's `!Unpin`
+    /// archived types cannot be written at all: through this `&mut`, two same-typed fields of
+    /// one entry can be swapped, which leaves any relative pointer in them dangling.
+    ///
+    /// So nothing may be written through the result but values, and even those only in place.
+    /// Callers handing this out publicly must narrow it to a seal first, as `index_seal` and
+    /// `get_seal` do.
     unsafe fn entries_seal(this: rkyv::seal::Seal<'_, Self>) -> &mut [Archived<O::Entry>] {
+        // SAFETY: the caller guarantees nothing but values is written through the result, so
+        // unsealing the table cannot invalidate the archive.
         let table = unsafe { this.unseal_unchecked() };
         let entries = rkyv::seal::Seal::new(&mut table.entries);
         let slice = rkyv::boxed::ArchivedBox::get_seal(entries);
+        // SAFETY: same obligation, forwarded to the caller of this function.
         unsafe { slice.unseal_unchecked() }
     }
 
@@ -246,6 +274,11 @@ where
         this: rkyv::seal::Seal<'_, Self>,
         index: usize,
     ) -> Option<rkyv::seal::Seal<'_, Archived<O::Entry>>> {
+        // SAFETY: the `&mut` is immediately narrowed back to a `Seal` over one entry and never
+        // used to write, so no key is written through it. What the caller does with that seal
+        // cannot break the archive either: rkyv marks every position-dependent archived type
+        // `!Unpin`, so `Seal::unseal` refuses to hand out a `&mut` to a key holding a relative
+        // pointer, and a key that is plain data can only be given a wrong value.
         let entries = unsafe { Self::entries_seal(this) };
         entries.get_mut(index).map(rkyv::seal::Seal::new)
     }
@@ -254,6 +287,7 @@ where
     ///
     /// `index` must be less than [`len`](Self::len).
     pub unsafe fn index_unchecked(&self, index: usize) -> &Archived<O::Entry> {
+        // SAFETY: the caller guarantees `index` is within the entry array.
         unsafe { self.entries.get_unchecked(index) }
     }
 
@@ -264,7 +298,10 @@ where
         this: rkyv::seal::Seal<'_, Self>,
         index: usize,
     ) -> rkyv::seal::Seal<'_, Archived<O::Entry>> {
+        // SAFETY: the caller guarantees `index` is within the entry array, so only that one entry
+        // is sealed and no key is written here.
         let entries = unsafe { Self::entries_seal(this) };
+        // SAFETY: the caller guarantees `index` is within the entry array.
         rkyv::seal::Seal::new(unsafe { entries.get_unchecked_mut(index) })
     }
 }
@@ -289,6 +326,8 @@ where
         Q: PortableHash + PortableEq<Archived<O::Key>> + ?Sized,
     {
         let modulus = self.entries.len() as u64;
+        // SAFETY: the caller guarantees the archived table is not empty. Stating that here is what
+        // lets the two reductions below compile without a division-by-zero check.
         unsafe {
             core::hint::assert_unchecked(modulus != 0);
         }
@@ -298,10 +337,14 @@ where
         self.global_param.portable_hash(&mut hasher);
         key.portable_hash(&mut hasher);
         let param_idx = (Hasher::finish(&hasher) % modulus) as usize;
+        // SAFETY: `param_idx` is a remainder modulo the entry count, and `params` holds exactly
+        // that many elements.
         let param = unsafe { *self.params.get_unchecked(param_idx) };
 
         param.portable_hash(&mut hasher);
         let index_idx = (Hasher::finish(&hasher) % modulus) as usize;
+        // SAFETY: `index_idx` is a remainder modulo the entry count, which is the bound
+        // `get_index_archived` requires of a slot.
         unsafe { O::get_index_archived(&self.indices, index_idx) }
     }
 
@@ -313,7 +356,9 @@ where
             return None;
         }
 
+        // SAFETY: the early return above establishes that the archived table is not empty.
         let index = unsafe { self.get_index_unchecked(key) };
+        // SAFETY: `get_index_unchecked` resolves to an index within the entry array.
         let entry = unsafe { self.entries.get_unchecked(index) };
         key.portable_eq(O::get_key_archived(entry)).then_some(index)
     }
@@ -326,7 +371,9 @@ where
             return false;
         }
 
+        // SAFETY: the early return above establishes that the archived table is not empty.
         let index = unsafe { self.get_index_unchecked(key) };
+        // SAFETY: `get_index_unchecked` resolves to an index within the entry array.
         let entry = unsafe { self.entries.get_unchecked(index) };
         key.portable_eq(O::get_key_archived(entry))
     }
@@ -339,7 +386,9 @@ where
             return None;
         }
 
+        // SAFETY: the early return above establishes that the archived table is not empty.
         let index = unsafe { self.get_index_unchecked(key) };
+        // SAFETY: `get_index_unchecked` resolves to an index within the entry array.
         let entry = unsafe { self.entries.get_unchecked(index) };
         key.portable_eq(O::get_key_archived(entry)).then_some(entry)
     }
@@ -355,7 +404,11 @@ where
             return None;
         }
 
+        // SAFETY: the early return above establishes that the archived table is not empty.
         let index = unsafe { this.get_index_unchecked(key) };
+        // SAFETY: `get_index_unchecked` resolves to an index within the entry array, and the
+        // `&mut` is only narrowed back to a `Seal` over that one entry, so no key is written
+        // through it. See `index_seal` for why the seal handed on cannot break the archive.
         let entry = unsafe { Self::entries_seal(this).get_unchecked_mut(index) };
         key.portable_eq(O::get_key_archived(entry))
             .then_some(rkyv::seal::Seal::new(entry))
@@ -368,7 +421,9 @@ where
     where
         Q: PortableHash + PortableEq<Archived<O::Key>> + ?Sized,
     {
+        // SAFETY: `get_index_unchecked` has this function's contract is the one the caller upheld.
         let idx = unsafe { self.get_index_unchecked(key) };
+        // SAFETY: `get_index_unchecked` resolves to an index within the entry array.
         unsafe { self.entries.get_unchecked(idx) }
     }
 
@@ -382,7 +437,11 @@ where
     where
         Q: PortableHash + PortableEq<Archived<O::Key>> + ?Sized,
     {
+        // SAFETY: `get_index_unchecked` has this function's contract is the one the caller upheld.
         let idx = unsafe { this.get_index_unchecked(key) };
+        // SAFETY: `get_index_unchecked` resolves to an index within the entry array, and the
+        // `&mut` is only narrowed back to a `Seal` over that one entry, so no key is written
+        // through it. See `index_seal` for why the seal handed on cannot break the archive.
         let entry = unsafe { Self::entries_seal(this).get_unchecked_mut(idx) };
         rkyv::seal::Seal::new(entry)
     }
@@ -399,6 +458,9 @@ where
 {
     pub fn map_index<'a>(&'a self, index: usize) -> Option<(&'a Archived<K>, &'a Archived<V>)> {
         self.index(index).map(|entry| {
+            // SAFETY: `O::Entry` is `(K, V)`, and rkyv archives a pair as `ArchivedTuple2`, so
+            // source and target are the same type; the associated type hides that from the
+            // compiler.
             let entry: &'a rkyv::tuple::ArchivedTuple2<Archived<K>, Archived<V>> =
                 unsafe { core::mem::transmute(entry) };
             (&entry.0, &entry.1)
@@ -410,7 +472,12 @@ where
         index: usize,
     ) -> Option<(&'a Archived<K>, rkyv::seal::Seal<'a, Archived<V>>)> {
         Self::index_seal(this, index).map(|entry| {
+            // SAFETY: the seal covers one entry of this table, and only its value is handed back
+            // below, so unsealing it here writes no key.
             let entry = unsafe { entry.unseal_unchecked() };
+            // SAFETY: `O::Entry` is `(K, V)`, and rkyv archives a pair as `ArchivedTuple2`, so
+            // source and target are the same type; the associated type hides that from the
+            // compiler.
             let entry: &'a mut rkyv::tuple::ArchivedTuple2<Archived<K>, Archived<V>> =
                 unsafe { core::mem::transmute(entry) };
             (&entry.0, rkyv::seal::Seal::new(&mut entry.1))
@@ -424,7 +491,10 @@ where
         &'a self,
         index: usize,
     ) -> (&'a Archived<K>, &'a Archived<V>) {
+        // SAFETY: `index_unchecked` has this function's contract, which the caller upheld.
         let entry = unsafe { self.index_unchecked(index) };
+        // SAFETY: `O::Entry` is `(K, V)`, and rkyv archives a pair as `ArchivedTuple2`, so source
+        // and target are the same type; the associated type hides that from the compiler.
         let entry: &'a rkyv::tuple::ArchivedTuple2<Archived<K>, Archived<V>> =
             unsafe { core::mem::transmute(entry) };
         (&entry.0, &entry.1)
@@ -437,7 +507,10 @@ where
         this: rkyv::seal::Seal<'a, Self>,
         index: usize,
     ) -> (&'a Archived<K>, rkyv::seal::Seal<'a, Archived<V>>) {
+        // SAFETY: `index_unchecked_seal` has this function's contract is the one the caller upheld.
         let entry = unsafe { Self::index_unchecked_seal(this, index) };
+        // SAFETY: `O::Entry` is `(K, V)`, and rkyv archives a pair as `ArchivedTuple2`, so source
+        // and target are the same type; the associated type hides that from the compiler.
         let entry: &'a mut rkyv::tuple::ArchivedTuple2<Archived<K>, Archived<V>> =
             unsafe { core::mem::transmute(entry) };
         (&entry.0, rkyv::seal::Seal::new(&mut entry.1))
@@ -461,6 +534,9 @@ where
         Q: PortableHash + PortableEq<Archived<O::Key>> + ?Sized,
     {
         self.get(key).map(|entry| {
+            // SAFETY: `O::Entry` is `(K, V)`, and rkyv archives a pair as `ArchivedTuple2`, so
+            // source and target are the same type; the associated type hides that from the
+            // compiler.
             let entry: &'a rkyv::tuple::ArchivedTuple2<Archived<K>, Archived<V>> =
                 unsafe { core::mem::transmute(entry) };
             (&entry.0, &entry.1)
@@ -475,6 +551,9 @@ where
         Q: PortableHash + PortableEq<Archived<O::Key>> + ?Sized,
     {
         Self::get_seal(this, key).map(|entry| {
+            // SAFETY: `O::Entry` is `(K, V)`, and rkyv archives a pair as `ArchivedTuple2`, so
+            // source and target are the same type; the associated type hides that from the
+            // compiler.
             let entry: &'a mut rkyv::tuple::ArchivedTuple2<Archived<K>, Archived<V>> =
                 unsafe { core::mem::transmute(entry) };
             (&entry.0, rkyv::seal::Seal::new(&mut entry.1))
@@ -491,7 +570,10 @@ where
     where
         Q: PortableHash + PortableEq<Archived<O::Key>> + ?Sized,
     {
+        // SAFETY: `get_unchecked` has this function's contract, which the caller upheld.
         let entry = unsafe { self.get_unchecked(key) };
+        // SAFETY: `O::Entry` is `(K, V)`, and rkyv archives a pair as `ArchivedTuple2`, so source
+        // and target are the same type; the associated type hides that from the compiler.
         let entry: &'a rkyv::tuple::ArchivedTuple2<Archived<K>, Archived<V>> =
             unsafe { core::mem::transmute(entry) };
         (&entry.0, &entry.1)
@@ -507,7 +589,10 @@ where
     where
         Q: PortableHash + PortableEq<Archived<O::Key>> + ?Sized,
     {
+        // SAFETY: `get_unchecked_seal` has this function's contract is the one the caller upheld.
         let entry = unsafe { Self::get_unchecked_seal(this, key) };
+        // SAFETY: `O::Entry` is `(K, V)`, and rkyv archives a pair as `ArchivedTuple2`, so source
+        // and target are the same type; the associated type hides that from the compiler.
         let entry: &'a mut rkyv::tuple::ArchivedTuple2<Archived<K>, Archived<V>> =
             unsafe { core::mem::transmute(entry) };
         (&entry.0, rkyv::seal::Seal::new(&mut entry.1))
@@ -519,6 +604,9 @@ where
         K::Archived: 'a,
     {
         self.get(key).map(|entry| {
+            // SAFETY: `O::Entry` is `(K, V)`, and rkyv archives a pair as `ArchivedTuple2`, so
+            // source and target are the same type; the associated type hides that from the
+            // compiler.
             let entry: &'a rkyv::tuple::ArchivedTuple2<Archived<K>, Archived<V>> =
                 unsafe { core::mem::transmute(entry) };
             &entry.1
@@ -534,6 +622,9 @@ where
         K::Archived: 'a,
     {
         Self::get_seal(this, key).map(|entry| {
+            // SAFETY: `O::Entry` is `(K, V)`, and rkyv archives a pair as `ArchivedTuple2`, so
+            // source and target are the same type; the associated type hides that from the
+            // compiler.
             let entry: &'a mut rkyv::tuple::ArchivedTuple2<Archived<K>, Archived<V>> =
                 unsafe { core::mem::transmute(entry) };
             rkyv::seal::Seal::new(&mut entry.1)
@@ -548,7 +639,10 @@ where
         Q: PortableHash + PortableEq<Archived<O::Key>> + ?Sized,
         K::Archived: 'a,
     {
+        // SAFETY: `get_unchecked` has this function's contract, which the caller upheld.
         let entry = unsafe { self.get_unchecked(key) };
+        // SAFETY: `O::Entry` is `(K, V)`, and rkyv archives a pair as `ArchivedTuple2`, so source
+        // and target are the same type; the associated type hides that from the compiler.
         let entry: &'a rkyv::tuple::ArchivedTuple2<Archived<K>, Archived<V>> =
             unsafe { core::mem::transmute(entry) };
         &entry.1
@@ -565,7 +659,10 @@ where
         Q: PortableHash + PortableEq<Archived<O::Key>> + ?Sized,
         K::Archived: 'a,
     {
+        // SAFETY: `get_unchecked_seal` has this function's contract is the one the caller upheld.
         let entry = unsafe { Self::get_unchecked_seal(this, key) };
+        // SAFETY: `O::Entry` is `(K, V)`, and rkyv archives a pair as `ArchivedTuple2`, so source
+        // and target are the same type; the associated type hides that from the compiler.
         let entry: &'a mut rkyv::tuple::ArchivedTuple2<Archived<K>, Archived<V>> =
             unsafe { core::mem::transmute(entry) };
         rkyv::seal::Seal::new(&mut entry.1)
@@ -584,9 +681,15 @@ where
     {
         let indices = keys.map(|key| this.get_index(key));
         assert!(unique_indices(&indices), "duplicate key found");
+        // SAFETY: the entry array is only used to build seals over single entries below; no key is
+        // written through it here.
         let entries = unsafe { Self::entries_seal(this) };
         indices.map(|idx| {
             idx.map(|idx| {
+                // SAFETY: `idx` came from `get_index`, so it is within the entry array, and the
+                // assert above rules out two keys sharing one, so no two borrows alias. `O::Entry`
+                // is `(K, V)`, and rkyv archives a pair as `ArchivedTuple2`, so source and target
+                // are the same type; the associated type hides that from the compiler.
                 let entry: &'a mut rkyv::tuple::ArchivedTuple2<Archived<K>, Archived<V>> =
                     unsafe { core::mem::transmute(&mut *entries.as_mut_ptr().add(idx)) };
                 (&entry.0, rkyv::seal::Seal::new(&mut entry.1))
@@ -607,9 +710,15 @@ where
     {
         let indices = keys.map(|key| this.get_index(key));
         assert!(unique_indices(&indices), "duplicate key found");
+        // SAFETY: the entry array is only used to build seals over single entries below; no key is
+        // written through it here.
         let entries = unsafe { Self::entries_seal(this) };
         indices.map(|idx| {
             idx.map(|idx| {
+                // SAFETY: `idx` came from `get_index`, so it is within the entry array, and the
+                // assert above rules out two keys sharing one, so no two borrows alias. `O::Entry`
+                // is `(K, V)`, and rkyv archives a pair as `ArchivedTuple2`, so source and target
+                // are the same type; the associated type hides that from the compiler.
                 let entry: &'a mut rkyv::tuple::ArchivedTuple2<Archived<K>, Archived<V>> =
                     unsafe { core::mem::transmute(&mut *entries.as_mut_ptr().add(idx)) };
                 rkyv::seal::Seal::new(&mut entry.1)
@@ -629,9 +738,15 @@ where
         Q: PortableHash + PortableEq<Archived<O::Key>> + ?Sized,
     {
         let indices = keys.map(|key| this.get_index(key));
+        // SAFETY: the entry array is only used to build seals over single entries below; no key is
+        // written through it here.
         let entries = unsafe { Self::entries_seal(this) };
         indices.map(|idx| {
             idx.map(|idx| {
+                // SAFETY: `idx` came from `get_index`, so it is within the entry array, and the
+                // caller guarantees no two keys share an entry, so no two borrows alias. `O::Entry`
+                // is `(K, V)`, and rkyv archives a pair as `ArchivedTuple2`, so source and target
+                // are the same type; the associated type hides that from the compiler.
                 let entry: &'a mut rkyv::tuple::ArchivedTuple2<Archived<K>, Archived<V>> =
                     unsafe { core::mem::transmute(&mut *entries.as_mut_ptr().add(idx)) };
                 (&entry.0, rkyv::seal::Seal::new(&mut entry.1))
@@ -651,9 +766,15 @@ where
         K::Archived: 'a,
     {
         let indices = keys.map(|key| this.get_index(key));
+        // SAFETY: the entry array is only used to build seals over single entries below; no key is
+        // written through it here.
         let entries = unsafe { Self::entries_seal(this) };
         indices.map(|idx| {
             idx.map(|idx| {
+                // SAFETY: `idx` came from `get_index`, so it is within the entry array, and the
+                // caller guarantees no two keys share an entry, so no two borrows alias. `O::Entry`
+                // is `(K, V)`, and rkyv archives a pair as `ArchivedTuple2`, so source and target
+                // are the same type; the associated type hides that from the compiler.
                 let entry: &'a mut rkyv::tuple::ArchivedTuple2<Archived<K>, Archived<V>> =
                     unsafe { core::mem::transmute(&mut *entries.as_mut_ptr().add(idx)) };
                 rkyv::seal::Seal::new(&mut entry.1)
