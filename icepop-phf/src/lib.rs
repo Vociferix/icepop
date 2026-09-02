@@ -52,9 +52,10 @@
 //! [`PortableHash`] and [`PortableBuildHasher`] fix the bytes fed to the hasher and the hash
 //! that comes back, and because the hasher's seed travels with the collection.
 //!
-//! With the `serde` feature, the collection serializes and deserializes as an ordinary struct.
-//! With the `rkyv` feature it also archives, and the archived form answers the full read
-//! interface directly out of the serialized bytes, with no deserialization step and no copies.
+//! Neither serialization backend is enabled by default. With the `serde` feature, the
+//! collection serializes and deserializes as an ordinary struct. With the `rkyv` feature it also
+//! archives, and the archived form answers the full read interface directly out of the
+//! serialized bytes, with no deserialization step and no copies.
 #![cfg_attr(feature = "rkyv", doc = "See [`rkyv::ArchivedMap`] and its siblings.")]
 //!
 //! # Example
@@ -78,10 +79,10 @@
 //!
 //! - `getrandom` *(default)*: Seeds [`DefaultHasherSeed::new`] from the operating system's
 //!   entropy source instead of a compile-time random value.
-//! - `rkyv` *(default)*: Archives the [`Portable`] collections with
+//! - `rkyv`: Archives the [`Portable`] collections with
 //!   [rkyv 0.8](https://docs.rs/rkyv/0.8/rkyv/), and provides the `rkyv` module of archived
 //!   forms that serve lookups directly from a serialized buffer.
-//! - `serde` *(default)*: Implements [serde](https://docs.rs/serde/1/serde/) `Serialize` and
+//! - `serde`: Implements [serde](https://docs.rs/serde/1/serde/) `Serialize` and
 //!   `Deserialize` for the [`Portable`] collections, and `Serialize` for their archived forms.
 //!
 //! The crate is `no_std`, but always requires `alloc`.

@@ -20,9 +20,7 @@
 //! the entry it found, and why the `*_unchecked` variants are `unsafe` only in that they skip the
 //! empty-table check.
 
-use crate::portability::{
-    BuildHasherOps, EqOps, HashOps, HasherOps, NonPortable, Portable, TableOps,
-};
+use crate::portability::{BuildHasherOps, EqOps, HashOps, HasherOps, NonPortable, TableOps};
 
 use portable::DefaultHasherSeed;
 
@@ -510,7 +508,7 @@ fn unique_indices(mut indices: &[Option<usize>]) -> bool {
 }
 
 #[cfg(feature = "serde")]
-impl<O, H> serde::Serialize for Table<O, H, Portable>
+impl<O, H> serde::Serialize for Table<O, H, crate::portability::Portable>
 where
     O: TableOps,
     O::Entry: serde::Serialize,
@@ -536,7 +534,7 @@ where
 }
 
 #[cfg(feature = "serde")]
-impl<'de, O, S> serde::Deserialize<'de> for Table<O, S, Portable>
+impl<'de, O, S> serde::Deserialize<'de> for Table<O, S, crate::portability::Portable>
 where
     O: TableOps,
     O::Entry: serde::Deserialize<'de>,
@@ -626,7 +624,7 @@ where
             O::Indices: serde::Deserialize<'de> + Default,
             S: serde::Deserialize<'de>,
         {
-            type Value = Table<O, S, Portable>;
+            type Value = Table<O, S, crate::portability::Portable>;
 
             fn expecting(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
                 f.write_str("a phf table layout")

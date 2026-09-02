@@ -15,7 +15,7 @@ serde = { version = "1", optional = true, default-features = false, features = [
 equivalent = "1.0.2"
 
 [features]
-default = ["getrandom", "rkyv", "serde"]
+default = ["getrandom"]
 serde = ["dep:serde", "portable/serde"]
 rkyv = ["dep:rkyv", "portable/rkyv-0_8"]
 getrandom = ["portable/getrandom"]

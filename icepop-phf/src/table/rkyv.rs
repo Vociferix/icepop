@@ -7,8 +7,8 @@
 //! Mutation goes through [`rkyv::seal::Seal`], which is what keeps in-place edits from breaking
 //! the table: everything reachable from a sealed archive is a value, never a key.
 
-use super::{Portable, Table, unique_indices};
-use crate::portability::TableOps;
+use super::{Table, unique_indices};
+use crate::portability::{Portable, TableOps};
 
 use portable::{DefaultHasherSeed, PortableBuildHasher, PortableEq, PortableHash};
 

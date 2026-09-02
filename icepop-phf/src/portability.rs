@@ -10,6 +10,7 @@
 //! [`TableOps`] is a second, unrelated axis: it names the entry, key, value and index-array
 //! types that distinguish a map from a set and an ordered collection from an unordered one.
 
+#[cfg(feature = "serde")]
 use crate::table::Table;
 
 #[cfg(feature = "rkyv")]
@@ -150,6 +151,7 @@ pub trait TableOps: Sized {
     ///
     /// Deserialization builds a table from untrusted input, so the invariants the builder
     /// establishes must be re-established here before any unchecked access is allowed.
+    #[cfg(feature = "serde")]
     fn verify<S>(table: &Table<Self, S, Portable>) -> bool;
 
     /// Borrows the key out of an archived entry.
@@ -217,6 +219,7 @@ impl<K, V> TableOps for OrderedMapOps<K, V> {
         (unsafe { *indices.get_unchecked(slot) }) as usize
     }
 
+    #[cfg(feature = "serde")]
     fn verify<S>(table: &Table<Self, S, Portable>) -> bool {
         let len = table.params.len();
         len == table.indices.len()
@@ -289,6 +292,7 @@ impl<K, V> TableOps for MapOps<K, V> {
         slot
     }
 
+    #[cfg(feature = "serde")]
     fn verify<S>(table: &Table<Self, S, Portable>) -> bool {
         table.params.len() == table.entries.len()
     }
@@ -353,6 +357,7 @@ impl<T> TableOps for OrderedSetOps<T> {
         (unsafe { *indices.get_unchecked(slot) }) as usize
     }
 
+    #[cfg(feature = "serde")]
     fn verify<S>(table: &Table<Self, S, Portable>) -> bool {
         let len = table.params.len();
         len == table.indices.len()
@@ -421,6 +426,7 @@ impl<T> TableOps for SetOps<T> {
         slot
     }
 
+    #[cfg(feature = "serde")]
     fn verify<S>(table: &Table<Self, S, Portable>) -> bool {
         table.params.len() == table.entries.len()
     }
