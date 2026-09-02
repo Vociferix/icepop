@@ -770,3 +770,153 @@ impl<K, V, S, P> IntoIterator for Builder<K, V, S, P> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use alloc::format;
+    use alloc::vec::Vec;
+
+    fn map_of(entries: impl IntoIterator<Item = (u32, u32)>) -> Map<u32, u32> {
+        let mut builder = Map::<u32, u32>::builder_with_hasher(DefaultHasherSeed::with_seed(1));
+        for (k, v) in entries {
+            builder.insert(k, v);
+        }
+        builder.build()
+    }
+
+    fn sorted<T: Ord>(iter: impl IntoIterator<Item = T>) -> Vec<T> {
+        let mut all = iter.into_iter().collect::<Vec<_>>();
+        all.sort();
+        all
+    }
+
+    #[test]
+    fn a_built_map_reports_its_contents() {
+        let map = map_of((0..5).map(|k| (k, k * 10)));
+
+        assert_eq!(map.len(), 5);
+        assert!(!map.is_empty());
+        assert_eq!(map.hasher().seed(), 1);
+        assert_eq!(map.as_slice().len(), 5);
+        assert!(Map::<u32, u32>::builder().build().is_empty());
+
+        assert_eq!(
+            sorted(map.iter().map(|(k, v)| (*k, *v))),
+            sorted((0..5).map(|k| (k, k * 10)))
+        );
+        assert_eq!(sorted(map.keys().copied()), [0, 1, 2, 3, 4]);
+        assert_eq!(sorted(map.values().copied()), [0, 10, 20, 30, 40]);
+        assert_eq!(sorted((&map).into_iter().map(|(k, _)| *k)), [0, 1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn values_are_reachable_by_index_and_mutable_in_place() {
+        let mut map = map_of((0..5).map(|k| (k, k * 10)));
+        let index = map.get_index(&3u32).unwrap();
+
+        assert_eq!(map.index(index), Some((&3, &30)));
+        assert_eq!(map.index(5), None);
+        // SAFETY: `get_index` returned this index, so it is in bounds.
+        assert_eq!(unsafe { map.index_unchecked(index) }, (&3, &30));
+
+        *map.index_mut(index).unwrap().1 = 1;
+        assert_eq!(map.index_mut(5), None);
+        // SAFETY: `get_index` returned this index, so it is in bounds.
+        *unsafe { map.index_unchecked_mut(index) }.1 += 1;
+        assert_eq!(map.get(&3u32), Some(&2));
+
+        for (_, value) in map.iter_mut() {
+            *value += 100;
+        }
+        for value in map.values_mut() {
+            *value += 1000;
+        }
+        assert_eq!(map.get(&3u32), Some(&1102));
+        assert_eq!(
+            sorted((&mut map).into_iter().map(|(k, _)| *k)),
+            [0, 1, 2, 3, 4]
+        );
+    }
+
+    #[test]
+    fn a_map_can_be_taken_apart_into_keys_values_or_entries() {
+        let map = map_of((0..3).map(|k| (k, k * 10)));
+
+        assert_eq!(sorted(map.clone().into_keys()), [0, 1, 2]);
+        assert_eq!(sorted(map.clone().into_values()), [0, 10, 20]);
+        assert_eq!(sorted(map.into_iter()), [(0, 0), (1, 10), (2, 20)]);
+    }
+
+    #[test]
+    fn a_builder_reports_its_contents_and_capacity() {
+        let mut builder =
+            Map::<u32, u32>::builder_with_capacity_and_hasher(50, DefaultHasherSeed::with_seed(2));
+        assert!(builder.is_empty());
+        assert!(builder.capacity() >= 50);
+        assert_eq!(builder.hasher().seed(), 2);
+
+        for k in 0..3u32 {
+            builder.insert(k, k * 10);
+        }
+        assert_eq!(builder.len(), 3);
+        assert_eq!(
+            sorted(builder.iter().map(|(k, v)| (*k, *v))),
+            [(0, 0), (1, 10), (2, 20)]
+        );
+        assert_eq!(sorted(builder.keys().copied()), [0, 1, 2]);
+        assert_eq!(sorted(builder.values().copied()), [0, 10, 20]);
+        assert_eq!(sorted((&builder).into_iter().map(|(k, _)| *k)), [0, 1, 2]);
+
+        for (_, value) in builder.iter_mut() {
+            *value += 1;
+        }
+        for value in builder.values_mut() {
+            *value += 1;
+        }
+        assert_eq!(builder.get(&0u32), Some(&2));
+        assert_eq!(
+            sorted((&mut builder).into_iter().map(|(k, _)| *k)),
+            [0, 1, 2]
+        );
+
+        builder.shrink_to(4);
+        assert!(builder.capacity() < 50);
+        builder.reserve(100);
+        assert!(builder.capacity() >= 100);
+        builder.shrink_to_fit();
+        assert!(builder.capacity() < 100);
+
+        assert_eq!(sorted(builder.clone().into_keys()), [0, 1, 2]);
+        assert_eq!(sorted(builder.clone().into_values()), [2, 12, 22]);
+        assert_eq!(
+            sorted(builder.clone().into_iter().map(|(k, _)| k)),
+            [0, 1, 2]
+        );
+
+        builder.clear();
+        assert!(builder.is_empty());
+    }
+
+    #[test]
+    fn cloning_and_formatting_reach_every_entry() {
+        let map = map_of((0..3).map(|k| (k, k * 10)));
+
+        let mut clone = map.clone();
+        clone.clone_from(&map);
+        assert_eq!(clone.len(), 3);
+
+        let shown = format!("{map:?}");
+        assert!(shown.starts_with('{') && shown.ends_with('}'), "{shown}");
+        assert!(shown.contains("20"), "{shown}");
+
+        let mut builder = Map::<u32, u32>::builder();
+        builder.insert(1, 10);
+        let mut builder_clone = builder.clone();
+        builder_clone.insert(2, 20);
+        builder.clone_from(&builder_clone);
+        assert_eq!(builder.len(), 2);
+        assert!(format!("{builder:?}").contains("10"));
+    }
+}

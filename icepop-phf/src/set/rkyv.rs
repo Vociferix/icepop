@@ -475,3 +475,87 @@ where
         self.table.serialize_set(serializer)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::PortableSet;
+
+    use alloc::format;
+    use alloc::vec::Vec;
+    use rkyv::rancor::Error;
+
+    fn archived_bytes(keys: impl IntoIterator<Item = u32>) -> rkyv::util::AlignedVec {
+        let mut builder = PortableSet::<u32>::builder_with_hasher(DefaultHasherSeed::with_seed(1));
+        for k in keys {
+            builder.insert(k);
+        }
+        rkyv::to_bytes::<Error>(&builder.build()).unwrap()
+    }
+
+    #[test]
+    fn an_archived_set_answers_every_query() {
+        let bytes = archived_bytes(0..8);
+        let archived = rkyv::access::<ArchivedSet<u32>, Error>(&bytes).unwrap();
+
+        assert_eq!(archived.len(), 8);
+        assert!(!archived.is_empty());
+        assert_eq!(archived.hasher().seed(), 1);
+        assert_eq!(archived.as_slice().len(), 8);
+
+        let mut seen = archived.iter().map(|e| e.to_native()).collect::<Vec<_>>();
+        seen.sort_unstable();
+        assert_eq!(seen, [0, 1, 2, 3, 4, 5, 6, 7]);
+        assert_eq!(archived.into_iter().count(), 8);
+
+        for k in 0..8u32 {
+            let index = archived.get_index(&k).unwrap();
+            assert!(archived.contains(&k));
+            assert_eq!(archived.get(&k).unwrap().to_native(), k);
+            assert_eq!(archived.index(index).unwrap().to_native(), k);
+
+            // SAFETY: the archive is not empty and `index` came from `get_index`.
+            unsafe {
+                assert_eq!(archived.get_index_unchecked(&k), index);
+                assert_eq!(archived.get_unchecked(&k).to_native(), k);
+                assert_eq!(archived.index_unchecked(index).to_native(), k);
+            }
+        }
+
+        assert_eq!(archived.get_index(&99u32), None);
+        assert!(!archived.contains(&99u32));
+        assert!(archived.get(&99u32).is_none());
+        assert!(archived.index(8).is_none());
+
+        let shown = format!("{archived:?}");
+        assert!(shown.starts_with('{') && shown.ends_with('}'), "{shown}");
+    }
+
+    #[test]
+    fn an_archive_round_trips_back_to_a_live_set() {
+        let bytes = archived_bytes(0..8);
+        let archived = rkyv::access::<ArchivedSet<u32>, Error>(&bytes).unwrap();
+
+        let set: PortableSet<u32> = rkyv::deserialize::<_, Error>(archived).unwrap();
+
+        assert_eq!(set.len(), 8);
+        assert_eq!(set.hasher().seed(), 1);
+        for k in 0..8u32 {
+            assert!(set.contains(&k));
+        }
+    }
+
+    #[test]
+    fn archived_equality_ignores_the_element_order() {
+        let a = archived_bytes(0..8);
+        let b = archived_bytes((0..8).rev());
+        let shorter = archived_bytes(0..7);
+
+        let aa = rkyv::access::<ArchivedSet<u32>, Error>(&a).unwrap();
+        let ab = rkyv::access::<ArchivedSet<u32>, Error>(&b).unwrap();
+        let as_ = rkyv::access::<ArchivedSet<u32>, Error>(&shorter).unwrap();
+
+        assert_eq!(aa, ab);
+        assert_ne!(aa, as_);
+    }
+}

@@ -783,6 +783,32 @@ where
     }
 }
 
+// Hand-written for the same reason as `Table`'s: a derive would demand `Debug` of the marker
+// type `O`, which carries no data and implements nothing.
+impl<O, S> core::fmt::Debug for ArchivedTable<O, S>
+where
+    O: TableOps,
+    O::Entry: Archive,
+    O::Indices: Archive,
+    S: Archive,
+    Archived<O::Entry>: core::fmt::Debug,
+    Archived<O::Indices>: core::fmt::Debug,
+    Archived<S>: core::fmt::Debug,
+{
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        // The boxed arrays are dereferenced so their contents show rather than the relative
+        // pointer that `ArchivedBox` prints. `indices` cannot be: it is `()` when the shape has
+        // no slot table, so there is no one type to reach through.
+        f.debug_struct("ArchivedTable")
+            .field("global_param", &self.global_param)
+            .field("params", &&*self.params)
+            .field("indices", &self.indices)
+            .field("entries", &&*self.entries)
+            .field("hasher_builder", &self.hasher_builder)
+            .finish()
+    }
+}
+
 impl<O, S1, S2> PartialEq<ArchivedTable<O, S2>> for ArchivedTable<O, S1>
 where
     O: TableOps,
@@ -920,3 +946,509 @@ cfg_select!(feature = "serde" => {
         }
     }
 } _ => {});
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::portability::{MapOps, OrderedSetOps, SetOps};
+    use crate::table::Builder;
+
+    use alloc::vec::Vec;
+    use rkyv::rancor::Error;
+    use rkyv::seal::Seal;
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+
+    type SetTable = Table<SetOps<u32>, DefaultHasherSeed, Portable>;
+    type MapTable = Table<MapOps<u32, u32>, DefaultHasherSeed, Portable>;
+    type ArchivedSetTable = ArchivedTable<SetOps<u32>, DefaultHasherSeed>;
+    type ArchivedMapTable = ArchivedTable<MapOps<u32, u32>, DefaultHasherSeed>;
+
+    fn set_of(keys: impl IntoIterator<Item = u32>) -> SetTable {
+        let mut builder: Builder<SetOps<u32>, _, Portable> =
+            Builder::with_hasher(DefaultHasherSeed::with_seed(1));
+        for k in keys {
+            builder.insert(k);
+        }
+        builder.build()
+    }
+
+    fn map_of(entries: impl IntoIterator<Item = (u32, u32)>) -> MapTable {
+        let mut builder: Builder<MapOps<u32, u32>, _, Portable> =
+            Builder::with_hasher(DefaultHasherSeed::with_seed(1));
+        for (k, v) in entries {
+            builder.map_insert(k, v);
+        }
+        builder.build()
+    }
+
+    #[test]
+    fn an_archived_table_answers_the_same_queries_as_the_live_one() {
+        let table = set_of(0..16);
+        let bytes = rkyv::to_bytes::<Error>(&table).unwrap();
+        let archived = rkyv::access::<ArchivedSetTable, Error>(&bytes).unwrap();
+
+        assert_eq!(archived.len(), table.len());
+        assert!(!archived.is_empty());
+        assert_eq!(archived.hasher().seed(), 1);
+        assert_eq!(archived.iter().count(), 16);
+        assert_eq!(archived.as_slice().len(), 16);
+
+        for k in 0..16u32 {
+            let index = archived.get_index(&k).expect("archived key present");
+            assert_eq!(index, table.get_index(&k).unwrap());
+            assert!(archived.contains(&k));
+            assert_eq!(archived.get(&k).unwrap().to_native(), k);
+            assert_eq!(archived.index(index).unwrap().to_native(), k);
+
+            // SAFETY: the archive is not empty and `index` came from `get_index`.
+            unsafe {
+                assert_eq!(archived.get_index_unchecked(&k), index);
+                assert_eq!(archived.get_unchecked(&k).to_native(), k);
+                assert_eq!(archived.index_unchecked(index).to_native(), k);
+            }
+        }
+
+        assert_eq!(archived.get_index(&99u32), None);
+        assert!(!archived.contains(&99u32));
+        assert!(archived.get(&99u32).is_none());
+        assert!(archived.index(16).is_none());
+    }
+
+    #[test]
+    fn an_empty_archive_answers_without_touching_an_entry() {
+        let table = set_of(core::iter::empty());
+        let bytes = rkyv::to_bytes::<Error>(&table).unwrap();
+        let archived = rkyv::access::<ArchivedSetTable, Error>(&bytes).unwrap();
+
+        assert!(archived.is_empty());
+        assert_eq!(archived.len(), 0);
+        assert_eq!(archived.get_index(&1u32), None);
+        assert!(!archived.contains(&1u32));
+        assert!(archived.get(&1u32).is_none());
+    }
+
+    #[test]
+    fn archived_map_accessors_split_entries_into_keys_and_values() {
+        let table = map_of((0..8).map(|k| (k, k * 10)));
+        let bytes = rkyv::to_bytes::<Error>(&table).unwrap();
+        let archived = rkyv::access::<ArchivedMapTable, Error>(&bytes).unwrap();
+
+        for k in 0..8u32 {
+            let index = archived.get_index(&k).unwrap();
+            let (key, value) = archived.map_index(index).unwrap();
+            assert_eq!((key.to_native(), value.to_native()), (k, k * 10));
+
+            let (key, value) = archived.map_get_key_value(&k).unwrap();
+            assert_eq!((key.to_native(), value.to_native()), (k, k * 10));
+            assert_eq!(archived.map_get(&k).unwrap().to_native(), k * 10);
+
+            // SAFETY: the archive is not empty and `index` came from `get_index`.
+            unsafe {
+                let (key, value) = archived.map_index_unchecked(index);
+                assert_eq!((key.to_native(), value.to_native()), (k, k * 10));
+                let (key, value) = archived.map_get_key_value_unchecked(&k);
+                assert_eq!((key.to_native(), value.to_native()), (k, k * 10));
+                assert_eq!(archived.map_get_unchecked(&k).to_native(), k * 10);
+            }
+        }
+
+        assert!(archived.map_index(99).is_none());
+        assert!(archived.map_get_key_value(&99u32).is_none());
+        assert!(archived.map_get(&99u32).is_none());
+    }
+
+    #[test]
+    fn sealed_accessors_rewrite_values_in_place() {
+        let table = set_of(0..10);
+        let mut bytes = rkyv::to_bytes::<Error>(&table).unwrap();
+
+        {
+            let archived = rkyv::access_mut::<ArchivedSetTable, Error>(&mut bytes).unwrap();
+            let value = ArchivedSetTable::get_seal(archived, &3u32).expect("present");
+            *Seal::unseal(value) = 300.into();
+        }
+        {
+            // Address a slot the previous edit did not touch, so the two are independent.
+            let index = table.get_index(&9u32).expect("present");
+            let archived = rkyv::access_mut::<ArchivedSetTable, Error>(&mut bytes).unwrap();
+            let value = ArchivedSetTable::index_seal(archived, index).expect("in bounds");
+            *Seal::unseal(value) = 900.into();
+        }
+
+        let archived = rkyv::access::<ArchivedSetTable, Error>(&bytes).unwrap();
+        let seen = archived.iter().map(|e| e.to_native()).collect::<Vec<_>>();
+        assert!(seen.contains(&300), "{seen:?}");
+        assert!(seen.contains(&900), "{seen:?}");
+        // Only the two targeted entries changed.
+        assert_eq!(seen.len(), 10);
+        for untouched in [0u32, 1, 2, 4, 5, 6, 7, 8] {
+            assert!(seen.contains(&untouched), "{untouched} disturbed: {seen:?}");
+        }
+
+        // A seal cannot reach outside the table it came from.
+        let mut bytes = rkyv::to_bytes::<Error>(&table).unwrap();
+        let archived = rkyv::access_mut::<ArchivedSetTable, Error>(&mut bytes).unwrap();
+        assert!(ArchivedSetTable::get_seal(archived, &99u32).is_none());
+        let archived = rkyv::access_mut::<ArchivedSetTable, Error>(&mut bytes).unwrap();
+        assert!(ArchivedSetTable::index_seal(archived, 10).is_none());
+    }
+
+    #[test]
+    fn unchecked_sealed_accessors_rewrite_values_in_place() {
+        let table = set_of(0..8);
+        let mut bytes = rkyv::to_bytes::<Error>(&table).unwrap();
+
+        {
+            let archived = rkyv::access_mut::<ArchivedSetTable, Error>(&mut bytes).unwrap();
+            // SAFETY: the archive is not empty.
+            let value = unsafe { ArchivedSetTable::get_unchecked_seal(archived, &3u32) };
+            *Seal::unseal(value) = 300.into();
+        }
+        {
+            // Address the slot holding a key no other edit touches.
+            let index = table.get_index(&7u32).expect("present");
+            let archived = rkyv::access_mut::<ArchivedSetTable, Error>(&mut bytes).unwrap();
+            // SAFETY: `index` came from `get_index`, so it is in bounds.
+            let value = unsafe { ArchivedSetTable::index_unchecked_seal(archived, index) };
+            *Seal::unseal(value) = 700.into();
+        }
+        {
+            let archived = rkyv::access_mut::<ArchivedSetTable, Error>(&mut bytes).unwrap();
+            // SAFETY: only values are written through the iterator, never keys.
+            for entry in unsafe { ArchivedSetTable::iter_mut(archived) } {
+                if entry.to_native() == 5 {
+                    *entry = 500.into();
+                }
+            }
+        }
+
+        let archived = rkyv::access::<ArchivedSetTable, Error>(&bytes).unwrap();
+        let seen = archived.iter().map(|e| e.to_native()).collect::<Vec<_>>();
+        for expected in [300u32, 700, 500] {
+            assert!(seen.contains(&expected), "{expected} missing from {seen:?}");
+        }
+        for untouched in [0u32, 1, 2, 4, 6] {
+            assert!(seen.contains(&untouched), "{untouched} disturbed: {seen:?}");
+        }
+    }
+
+    #[test]
+    fn sealed_map_accessors_reach_values_and_leave_keys_shared() {
+        let table = map_of((0..8).map(|k| (k, k * 10)));
+        let mut bytes = rkyv::to_bytes::<Error>(&table).unwrap();
+
+        {
+            let archived = rkyv::access_mut::<ArchivedMapTable, Error>(&mut bytes).unwrap();
+            let (key, value) = ArchivedMapTable::map_get_key_value_seal(archived, &1u32).unwrap();
+            assert_eq!(key.to_native(), 1);
+            *Seal::unseal(value) = 111.into();
+        }
+        {
+            let archived = rkyv::access_mut::<ArchivedMapTable, Error>(&mut bytes).unwrap();
+            let value = ArchivedMapTable::map_get_seal(archived, &2u32).unwrap();
+            *Seal::unseal(value) = 222.into();
+        }
+        {
+            let archived = rkyv::access_mut::<ArchivedMapTable, Error>(&mut bytes).unwrap();
+            let index = archived.get_index(&3u32).unwrap();
+            let (key, value) = ArchivedMapTable::map_index_seal(archived, index).unwrap();
+            assert_eq!(key.to_native(), 3);
+            *Seal::unseal(value) = 333.into();
+        }
+        {
+            let archived = rkyv::access_mut::<ArchivedMapTable, Error>(&mut bytes).unwrap();
+            // SAFETY: the archive is not empty.
+            let (_, value) =
+                unsafe { ArchivedMapTable::map_get_key_value_unchecked_seal(archived, &4u32) };
+            *Seal::unseal(value) = 444.into();
+        }
+        {
+            let archived = rkyv::access_mut::<ArchivedMapTable, Error>(&mut bytes).unwrap();
+            // SAFETY: the archive is not empty.
+            let value = unsafe { ArchivedMapTable::map_get_unchecked_seal(archived, &5u32) };
+            *Seal::unseal(value) = 555.into();
+        }
+        {
+            let archived = rkyv::access_mut::<ArchivedMapTable, Error>(&mut bytes).unwrap();
+            let index = archived.get_index(&6u32).unwrap();
+            // SAFETY: `index` came from `get_index`, so it is in bounds.
+            let (_, value) = unsafe { ArchivedMapTable::map_index_unchecked_seal(archived, index) };
+            *Seal::unseal(value) = 666.into();
+        }
+
+        let archived = rkyv::access::<ArchivedMapTable, Error>(&bytes).unwrap();
+        for (k, expected) in [
+            (1u32, 111u32),
+            (2, 222),
+            (3, 333),
+            (4, 444),
+            (5, 555),
+            (6, 666),
+        ] {
+            assert_eq!(archived.map_get(&k).unwrap().to_native(), expected);
+        }
+        // The untouched entry still holds its original value, so nothing else was disturbed.
+        assert_eq!(archived.map_get(&7u32).unwrap().to_native(), 70);
+    }
+
+    #[test]
+    fn disjoint_seals_hand_out_independent_values() {
+        let table = map_of((0..8).map(|k| (k, k * 10)));
+        let mut bytes = rkyv::to_bytes::<Error>(&table).unwrap();
+
+        {
+            let archived = rkyv::access_mut::<ArchivedMapTable, Error>(&mut bytes).unwrap();
+            let [a, b, missing] =
+                ArchivedMapTable::map_get_disjoint_seal(archived, [&1u32, &2u32, &99u32]);
+            *Seal::unseal(a.unwrap()) = 111.into();
+            *Seal::unseal(b.unwrap()) = 222.into();
+            assert!(missing.is_none());
+        }
+        {
+            let archived = rkyv::access_mut::<ArchivedMapTable, Error>(&mut bytes).unwrap();
+            let [a, missing] =
+                ArchivedMapTable::map_get_disjoint_key_value_seal(archived, [&3u32, &99u32]);
+            let (key, value) = a.unwrap();
+            assert_eq!(key.to_native(), 3);
+            *Seal::unseal(value) = 333.into();
+            assert!(missing.is_none());
+        }
+        {
+            let archived = rkyv::access_mut::<ArchivedMapTable, Error>(&mut bytes).unwrap();
+            // SAFETY: the keys are pairwise distinct, so they cannot share an entry.
+            let [a, b] = unsafe {
+                ArchivedMapTable::map_get_disjoint_unchecked_seal(archived, [&4u32, &5u32])
+            };
+            *Seal::unseal(a.unwrap()) = 444.into();
+            *Seal::unseal(b.unwrap()) = 555.into();
+        }
+        {
+            let archived = rkyv::access_mut::<ArchivedMapTable, Error>(&mut bytes).unwrap();
+            // SAFETY: the keys are pairwise distinct, so they cannot share an entry.
+            let [a, b] = unsafe {
+                ArchivedMapTable::map_get_disjoint_key_value_unchecked_seal(
+                    archived,
+                    [&6u32, &7u32],
+                )
+            };
+            *Seal::unseal(a.unwrap().1) = 666.into();
+            *Seal::unseal(b.unwrap().1) = 777.into();
+        }
+
+        let archived = rkyv::access::<ArchivedMapTable, Error>(&bytes).unwrap();
+        for k in 1..8u32 {
+            assert_eq!(archived.map_get(&k).unwrap().to_native(), k * 111);
+        }
+    }
+
+    #[test]
+    fn the_checked_disjoint_seals_refuse_to_alias() {
+        let table = map_of((0..8).map(|k| (k, k * 10)));
+        let mut bytes = rkyv::to_bytes::<Error>(&table).unwrap();
+
+        let aliased = catch_unwind(AssertUnwindSafe(|| {
+            let archived = rkyv::access_mut::<ArchivedMapTable, Error>(&mut bytes).unwrap();
+            ArchivedMapTable::map_get_disjoint_seal(archived, [&1u32, &1u32]);
+        }));
+        assert!(
+            aliased.is_err(),
+            "two seals over one entry must not be handed out"
+        );
+
+        let aliased = catch_unwind(AssertUnwindSafe(|| {
+            let archived = rkyv::access_mut::<ArchivedMapTable, Error>(&mut bytes).unwrap();
+            ArchivedMapTable::map_get_disjoint_key_value_seal(archived, [&2u32, &2u32]);
+        }));
+        assert!(
+            aliased.is_err(),
+            "two seals over one entry must not be handed out"
+        );
+    }
+
+    #[test]
+    fn validation_rejects_an_index_that_points_outside_the_entries() {
+        // The unchecked accessors trust `indices` to be in range, so a tampered archive has to
+        // be refused rather than accepted and dereferenced.
+        let mut builder: Builder<OrderedSetOps<u32>, _, Portable> =
+            Builder::with_hasher(DefaultHasherSeed::with_seed(1));
+        for k in 0..8u32 {
+            builder.insert(k);
+        }
+        let table = builder.build();
+
+        let mut bytes = rkyv::to_bytes::<Error>(&table).unwrap();
+        type Archived8 = ArchivedTable<OrderedSetOps<u32>, DefaultHasherSeed>;
+        assert!(rkyv::access::<Archived8, Error>(&bytes).is_ok());
+
+        let offset = {
+            let archived = rkyv::access::<Archived8, Error>(&bytes).unwrap();
+            archived.indices.as_ptr() as usize - bytes.as_ptr() as usize
+        };
+        // Any byte pattern here yields an index of at least 255, well past the eight entries.
+        bytes.as_mut_slice()[offset] = 0xFF;
+
+        assert!(
+            rkyv::access::<Archived8, Error>(&bytes).is_err(),
+            "an out-of-range slot must fail validation",
+        );
+    }
+
+    #[test]
+    fn an_archived_table_shows_the_parameters_that_address_its_entries() {
+        let table = map_of([(1u32, 10u32)]);
+        let bytes = rkyv::to_bytes::<Error>(&table).unwrap();
+        let archived = rkyv::access::<ArchivedMapTable, Error>(&bytes).unwrap();
+
+        let shown = alloc::format!("{archived:?}");
+        for field in [
+            "global_param",
+            "params",
+            "indices",
+            "entries",
+            "hasher_builder",
+        ] {
+            assert!(shown.contains(field), "`{field}` missing from {shown}");
+        }
+        assert!(shown.contains("10"), "{shown}");
+    }
+
+    #[test]
+    fn an_archive_deserializes_back_into_a_live_table() {
+        let table = map_of((0..8).map(|k| (k, k * 10)));
+        let bytes = rkyv::to_bytes::<Error>(&table).unwrap();
+        let archived = rkyv::access::<ArchivedMapTable, Error>(&bytes).unwrap();
+
+        let round_tripped: MapTable = rkyv::deserialize::<_, Error>(archived).unwrap();
+
+        assert_eq!(round_tripped.len(), 8);
+        assert_eq!(round_tripped.hasher().seed(), 1);
+        for k in 0..8u32 {
+            assert_eq!(round_tripped.map_get(&k), Some(&(k * 10)));
+        }
+    }
+
+    #[test]
+    fn archived_equality_ignores_the_entry_order() {
+        let a = map_of((0..8).map(|k| (k, k * 10)));
+        let b = {
+            let mut builder: Builder<MapOps<u32, u32>, _, Portable> =
+                Builder::with_hasher(DefaultHasherSeed::with_seed(9));
+            for k in (0..8u32).rev() {
+                builder.map_insert(k, k * 10);
+            }
+            builder.build()
+        };
+        let shorter = map_of((0..7).map(|k| (k, k * 10)));
+        let differing = map_of((0..8).map(|k| (k, if k == 3 { 99 } else { k * 10 })));
+
+        let (ba, bb) = (
+            rkyv::to_bytes::<Error>(&a).unwrap(),
+            rkyv::to_bytes::<Error>(&b).unwrap(),
+        );
+        let (bs, bd) = (
+            rkyv::to_bytes::<Error>(&shorter).unwrap(),
+            rkyv::to_bytes::<Error>(&differing).unwrap(),
+        );
+
+        let aa = rkyv::access::<ArchivedMapTable, Error>(&ba).unwrap();
+        let ab = rkyv::access::<ArchivedMapTable, Error>(&bb).unwrap();
+        let as_ = rkyv::access::<ArchivedMapTable, Error>(&bs).unwrap();
+        let ad = rkyv::access::<ArchivedMapTable, Error>(&bd).unwrap();
+
+        assert_eq!(aa, ab);
+        assert_ne!(aa, as_);
+        assert_ne!(aa, ad);
+    }
+}
+
+#[cfg(all(test, feature = "serde"))]
+mod serde_tests {
+    use super::*;
+    use crate::portability::{MapOps, SetOps};
+    use crate::table::Builder;
+
+    use alloc::string::String;
+    use alloc::vec::Vec;
+    use portable::{PortableEq, PortableHash};
+    use rkyv::rancor::Error;
+
+    // Reaching these methods means naming an archived type that implements `serde::Serialize`.
+    // rkyv's own archived types never will — `ArchivedString` and `u32_le` are foreign, so
+    // nobody downstream can implement it for them — but a newtype makes the archived form local
+    // and the impl writable. Both halves of an entry need it, integers included.
+    macro_rules! newtype {
+        ($name:ident, $archived:ident, $inner:ty, $ser:ident, $native:ident) => {
+            #[derive(rkyv::Archive, rkyv::Serialize, serde::Serialize, Debug, PartialEq, Eq)]
+            #[serde(transparent)]
+            struct $name($inner);
+
+            impl PortableHash for $name {
+                fn portable_hash<H: core::hash::Hasher>(&self, state: &mut H) {
+                    self.0.portable_hash(state);
+                }
+            }
+
+            impl PortableEq<$name> for $name {
+                fn portable_eq(&self, other: &$name) -> bool {
+                    self.0.portable_eq(&other.0)
+                }
+            }
+
+            impl serde::Serialize for $archived {
+                fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+                    s.$ser(self.0.$native())
+                }
+            }
+        };
+    }
+
+    newtype!(Key, ArchivedKey, String, serialize_str, as_str);
+    newtype!(Count, ArchivedCount, u32, serialize_u32, to_native);
+
+    fn to_json(value: impl serde::Serialize) -> String {
+        serde_json::to_string(&value).unwrap()
+    }
+
+    #[test]
+    fn an_archived_map_serializes_exactly_like_the_map_it_came_from() {
+        let mut builder: Builder<MapOps<Key, Count>, _, Portable> =
+            Builder::with_hasher(DefaultHasherSeed::with_seed(7));
+        builder.insert((Key("a".into()), Count(1)));
+        builder.insert((Key("bb".into()), Count(2)));
+        let table = builder.build();
+
+        let bytes = rkyv::to_bytes::<Error>(&table).unwrap();
+        let archived =
+            rkyv::access::<ArchivedTable<MapOps<Key, Count>, DefaultHasherSeed>, Error>(&bytes)
+                .unwrap();
+
+        let mut out = Vec::new();
+        archived
+            .serialize_map(&mut serde_json::Serializer::new(&mut out))
+            .unwrap();
+
+        // The two forms have to be interchangeable to a `serde` consumer, so an archive can be
+        // re-serialized without deserializing it first.
+        assert_eq!(String::from_utf8(out).unwrap(), to_json(&table));
+    }
+
+    #[test]
+    fn an_archived_set_serializes_exactly_like_the_set_it_came_from() {
+        let mut builder: Builder<SetOps<Key>, _, Portable> =
+            Builder::with_hasher(DefaultHasherSeed::with_seed(7));
+        builder.insert(Key("a".into()));
+        builder.insert(Key("bb".into()));
+        let table = builder.build();
+
+        let bytes = rkyv::to_bytes::<Error>(&table).unwrap();
+        let archived =
+            rkyv::access::<ArchivedTable<SetOps<Key>, DefaultHasherSeed>, Error>(&bytes).unwrap();
+
+        let mut out = Vec::new();
+        archived
+            .serialize_set(&mut serde_json::Serializer::new(&mut out))
+            .unwrap();
+
+        assert_eq!(String::from_utf8(out).unwrap(), to_json(&table));
+    }
+}

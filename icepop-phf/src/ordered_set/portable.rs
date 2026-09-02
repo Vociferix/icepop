@@ -606,3 +606,132 @@ cfg_select!(feature = "serde" => {
         }
     }
 } _ => {});
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::PortableOrderedSet;
+
+    use alloc::vec::Vec;
+
+    #[test]
+    fn every_constructor_reaches_the_same_builder() {
+        assert!(PortableOrderedSet::<u32>::builder().build().is_empty());
+        assert!(PortableOrderedSet::<u32>::builder_with_capacity(8).capacity() >= 8);
+        assert_eq!(
+            PortableOrderedSet::<u32>::builder_with_hasher(DefaultHasherSeed::with_seed(3))
+                .hasher()
+                .seed(),
+            3,
+        );
+        assert!(
+            PortableOrderedSet::<u32>::builder_with_capacity_and_hasher(
+                8,
+                DefaultHasherSeed::with_seed(3)
+            )
+            .capacity()
+                >= 8
+        );
+
+        assert!(
+            Builder::<u32, DefaultHasherSeed, Portable>::new()
+                .build()
+                .is_empty()
+        );
+        assert!(Builder::<u32, DefaultHasherSeed, Portable>::with_capacity(8).capacity() >= 8);
+        assert_eq!(
+            Builder::<u32, DefaultHasherSeed, Portable>::with_hasher(DefaultHasherSeed::with_seed(
+                3
+            ))
+            .hasher()
+            .seed(),
+            3,
+        );
+        assert!(
+            Builder::<u32, DefaultHasherSeed, Portable>::with_capacity_and_hasher(
+                8,
+                DefaultHasherSeed::with_seed(3)
+            )
+            .capacity()
+                >= 8
+        );
+
+        assert!(PortableOrderedSet::<u32>::default().is_empty());
+        assert!(
+            Builder::<u32, DefaultHasherSeed, Portable>::default()
+                .build()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn lookups_reach_present_and_absent_keys() {
+        let set: PortableOrderedSet<u32> = (0..8u32).collect();
+
+        for k in 0..8u32 {
+            assert!(set.contains(&k));
+            assert_eq!(set.get(&k), Some(&k));
+            assert_eq!(set.get_index(&k), Some(k as usize));
+            // SAFETY: the set is not empty.
+            unsafe {
+                assert_eq!(set.get_index_unchecked(&k), k as usize);
+                assert_eq!(set.get_unchecked(&k), &k);
+            }
+        }
+
+        assert_eq!(set.get_index(&99u32), None);
+        assert!(!set.contains(&99u32));
+        assert_eq!(set.get(&99u32), None);
+    }
+
+    #[test]
+    fn the_builder_inserts_replaces_and_removes_in_place() {
+        let mut builder = PortableOrderedSet::<u32>::builder();
+        for k in [5u32, 1, 9] {
+            builder.insert(k);
+        }
+
+        assert!(!builder.insert(5));
+        assert_eq!(builder.replace(5), Some(5));
+        assert_eq!(builder.get_or_insert(1), &1);
+        assert_eq!(builder.get_or_insert_with(&2u32, || 2), &2);
+        assert!(builder.contains(&9u32));
+        assert_eq!(builder.get(&9u32), Some(&9));
+        assert_eq!(builder.get(&99u32), None);
+        assert!(!builder.contains(&99u32));
+
+        // Removal closes the gap rather than reordering.
+        assert_eq!(builder.iter().copied().collect::<Vec<_>>(), [5, 1, 9, 2]);
+        assert_eq!(builder.take(&1u32), Some(1));
+        assert_eq!(builder.take(&1u32), None);
+        assert!(builder.remove(&9u32));
+        assert!(!builder.remove(&9u32));
+        assert_eq!(builder.iter().copied().collect::<Vec<_>>(), [5, 2]);
+    }
+
+    #[test]
+    fn equality_compares_the_element_order() {
+        let a: PortableOrderedSet<u32> = [1u32, 2, 3].into_iter().collect();
+        let same: PortableOrderedSet<u32> = [1u32, 2, 3].into_iter().collect();
+        let reordered: PortableOrderedSet<u32> = [3u32, 2, 1].into_iter().collect();
+
+        assert_eq!(a, same);
+        assert_ne!(a, reordered);
+        assert_ne!(
+            a,
+            [1u32, 2].into_iter().collect::<PortableOrderedSet<u32>>()
+        );
+
+        let mut ba: Builder<u32, DefaultHasherSeed, Portable> = [1u32, 2].into_iter().collect();
+        let bb: Builder<u32, DefaultHasherSeed, Portable> = [1u32, 2].into_iter().collect();
+        assert_eq!(ba, bb);
+        ba.extend([3u32]);
+        assert_ne!(ba, bb);
+    }
+
+    #[test]
+    fn collecting_keeps_the_first_of_two_equal_elements() {
+        let set: PortableOrderedSet<u32> = [1u32, 2, 1].into_iter().collect();
+        assert_eq!(set.as_slice(), &[1, 2]);
+    }
+}

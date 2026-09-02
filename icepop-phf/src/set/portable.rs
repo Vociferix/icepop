@@ -628,3 +628,282 @@ cfg_select!(feature = "serde" => {
         }
     }
 } _ => {});
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::PortableSet;
+
+    use alloc::vec::Vec;
+
+    fn set_of(keys: impl IntoIterator<Item = u32>) -> PortableSet<u32> {
+        let mut builder = PortableSet::<u32>::builder_with_hasher(DefaultHasherSeed::with_seed(1));
+        for k in keys {
+            builder.insert(k);
+        }
+        builder.build()
+    }
+
+    #[test]
+    fn every_constructor_reaches_the_same_builder() {
+        assert!(PortableSet::<u32>::builder().build().is_empty());
+        assert!(PortableSet::<u32>::builder_with_capacity(8).capacity() >= 8);
+        assert_eq!(
+            PortableSet::<u32>::builder_with_hasher(DefaultHasherSeed::with_seed(3))
+                .hasher()
+                .seed(),
+            3,
+        );
+
+        let builder = PortableSet::<u32>::builder_with_capacity_and_hasher(
+            8,
+            DefaultHasherSeed::with_seed(3),
+        );
+        assert!(builder.capacity() >= 8);
+        assert_eq!(builder.hasher().seed(), 3);
+
+        assert!(
+            Builder::<u32, DefaultHasherSeed, Portable>::new()
+                .build()
+                .is_empty()
+        );
+        assert!(Builder::<u32, DefaultHasherSeed, Portable>::with_capacity(8).capacity() >= 8);
+        assert_eq!(
+            Builder::<u32, DefaultHasherSeed, Portable>::with_hasher(DefaultHasherSeed::with_seed(
+                3
+            ))
+            .hasher()
+            .seed(),
+            3,
+        );
+        assert!(
+            Builder::<u32, DefaultHasherSeed, Portable>::with_capacity_and_hasher(
+                8,
+                DefaultHasherSeed::with_seed(3)
+            )
+            .capacity()
+                >= 8
+        );
+
+        assert!(PortableSet::<u32>::default().is_empty());
+        assert!(
+            Builder::<u32, DefaultHasherSeed, Portable>::default()
+                .build()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn lookups_reach_present_and_absent_keys() {
+        let set = set_of(0..8);
+
+        for k in 0..8u32 {
+            let index = set.get_index(&k).unwrap();
+            assert!(set.contains(&k));
+            assert_eq!(set.get(&k), Some(&k));
+            assert_eq!(set.index(index), Some(&k));
+
+            // SAFETY: the set is not empty.
+            unsafe {
+                assert_eq!(set.get_index_unchecked(&k), index);
+                assert_eq!(set.get_unchecked(&k), &k);
+            }
+        }
+
+        assert_eq!(set.get_index(&99u32), None);
+        assert!(!set.contains(&99u32));
+        assert_eq!(set.get(&99u32), None);
+    }
+
+    #[test]
+    fn the_builder_inserts_replaces_and_removes() {
+        let mut builder = PortableSet::<u32>::builder();
+
+        assert!(builder.insert(1));
+        assert!(!builder.insert(1));
+        assert_eq!(builder.replace(1), Some(1));
+        assert_eq!(builder.get_or_insert(2), &2);
+        assert_eq!(builder.get_or_insert_with(&3u32, || 3), &3);
+        assert_eq!(builder.get_or_insert_with(&3u32, || unreachable!()), &3);
+
+        assert!(builder.contains(&1u32));
+        assert_eq!(builder.get(&2u32), Some(&2));
+        assert_eq!(builder.get(&99u32), None);
+        assert!(!builder.contains(&99u32));
+
+        assert_eq!(builder.take(&1u32), Some(1));
+        assert_eq!(builder.take(&1u32), None);
+        assert!(builder.remove(&2u32));
+        assert!(!builder.remove(&2u32));
+        assert_eq!(builder.len(), 1);
+    }
+
+    #[test]
+    fn collecting_keeps_the_first_of_two_equal_elements() {
+        // `insert` semantics, matching the standard library's `HashSet`.
+        let set: PortableSet<u32> = [1u32, 2, 1].into_iter().collect();
+        assert_eq!(set.len(), 2);
+
+        let mut builder: Builder<u32, DefaultHasherSeed, Portable> =
+            [1u32, 2].into_iter().collect();
+        builder.extend([2u32, 3]);
+        assert_eq!(builder.len(), 3);
+
+        let mut all = builder.build().iter().copied().collect::<Vec<_>>();
+        all.sort_unstable();
+        assert_eq!(all, [1, 2, 3]);
+    }
+
+    #[test]
+    fn equality_ignores_the_element_order_and_the_hasher() {
+        let a = set_of(0..8);
+        let mut b = PortableSet::<u32>::builder_with_hasher(DefaultHasherSeed::with_seed(9));
+        for k in (0..8u32).rev() {
+            b.insert(k);
+        }
+        let b = b.build();
+
+        assert_eq!(a, b);
+        assert_eq!(a, a);
+        assert_ne!(a, set_of(0..7));
+        assert_ne!(a, set_of(1..9));
+
+        let mut ba = PortableSet::<u32>::builder();
+        let mut bb = PortableSet::<u32>::builder();
+        ba.insert(1);
+        bb.insert(1);
+        assert_eq!(ba, bb);
+        bb.insert(2);
+        assert_ne!(ba, bb);
+    }
+}
+
+#[cfg(all(test, feature = "serde"))]
+mod serde_tests {
+    use super::*;
+    use crate::PortableSet;
+
+    use serde_test::{Token, assert_de_tokens, assert_de_tokens_error, assert_ser_tokens};
+
+    /// A one-entry set, whose layout is fixed whatever the hasher does: the only slot is the
+    /// only index, so `entries` and `params` cannot come out any other way.
+    fn one_entry() -> PortableSet<u32> {
+        let mut builder = PortableSet::<u32>::builder_with_hasher(DefaultHasherSeed::with_seed(7));
+        builder.insert(42);
+        builder.build()
+    }
+
+    fn hasher_tokens() -> [Token; 4] {
+        [
+            Token::Struct {
+                name: "DefaultHasherSeed",
+                len: 1,
+            },
+            Token::Str("seed"),
+            Token::U64(7),
+            Token::StructEnd,
+        ]
+    }
+
+    #[test]
+    fn a_set_without_a_slot_table_writes_four_fields() {
+        assert_ser_tokens(
+            &one_entry(),
+            &[
+                Token::Struct {
+                    name: "Table",
+                    len: 4,
+                },
+                Token::Str("hasher"),
+                hasher_tokens()[0],
+                hasher_tokens()[1],
+                hasher_tokens()[2],
+                hasher_tokens()[3],
+                Token::Str("entries"),
+                Token::Seq { len: Some(1) },
+                Token::U32(42),
+                Token::SeqEnd,
+                Token::Str("global_param"),
+                Token::U8(0),
+                Token::Str("params"),
+                Token::Seq { len: Some(1) },
+                Token::U32(0),
+                Token::SeqEnd,
+                Token::StructEnd,
+            ],
+        );
+    }
+
+    #[test]
+    fn a_compact_format_may_send_the_fields_as_a_sequence() {
+        // A non-self-describing format drops the names entirely, which is the `visit_seq` path.
+        assert_de_tokens(
+            &one_entry(),
+            &[
+                Token::Seq { len: Some(4) },
+                hasher_tokens()[0],
+                hasher_tokens()[1],
+                hasher_tokens()[2],
+                hasher_tokens()[3],
+                Token::Seq { len: Some(1) },
+                Token::U32(42),
+                Token::SeqEnd,
+                Token::U8(0),
+                Token::Seq { len: Some(1) },
+                Token::U32(0),
+                Token::SeqEnd,
+                Token::SeqEnd,
+            ],
+        );
+    }
+
+    #[test]
+    fn a_format_may_identify_the_fields_by_index() {
+        assert_de_tokens(
+            &one_entry(),
+            &[
+                Token::Map { len: Some(4) },
+                Token::U64(0),
+                hasher_tokens()[0],
+                hasher_tokens()[1],
+                hasher_tokens()[2],
+                hasher_tokens()[3],
+                Token::U64(1),
+                Token::Seq { len: Some(1) },
+                Token::U32(42),
+                Token::SeqEnd,
+                Token::U64(2),
+                Token::U8(0),
+                Token::U64(3),
+                Token::Seq { len: Some(1) },
+                Token::U32(0),
+                Token::SeqEnd,
+                Token::MapEnd,
+            ],
+        );
+    }
+
+    #[test]
+    fn a_field_index_outside_the_struct_is_refused() {
+        assert_de_tokens_error::<PortableSet<u32>>(
+            &[Token::Map { len: Some(1) }, Token::U64(9)],
+            "invalid value: integer `9`, expected one of \"global_param\", \"params\", \
+             \"indices\", \"entries\", or \"hasher\"",
+        );
+    }
+
+    #[test]
+    fn a_sequence_that_stops_early_is_refused() {
+        assert_de_tokens_error::<PortableSet<u32>>(
+            &[
+                Token::Seq { len: Some(1) },
+                hasher_tokens()[0],
+                hasher_tokens()[1],
+                hasher_tokens()[2],
+                hasher_tokens()[3],
+                Token::SeqEnd,
+            ],
+            "missing field `entries`",
+        );
+    }
+}

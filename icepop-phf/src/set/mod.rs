@@ -473,3 +473,108 @@ impl<T, S, P> IntoIterator for Builder<T, S, P> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use alloc::format;
+    use alloc::vec::Vec;
+
+    fn set_of(keys: impl IntoIterator<Item = u32>) -> Set<u32> {
+        let mut builder = Set::<u32>::builder_with_hasher(DefaultHasherSeed::with_seed(1));
+        for k in keys {
+            builder.insert(k);
+        }
+        builder.build()
+    }
+
+    #[test]
+    fn a_built_set_reports_its_contents() {
+        let set = set_of(0..5);
+
+        assert_eq!(set.len(), 5);
+        assert!(!set.is_empty());
+        assert_eq!(set.hasher().seed(), 1);
+        assert_eq!(set.as_slice().len(), 5);
+
+        let mut seen = set.iter().copied().collect::<Vec<_>>();
+        seen.sort_unstable();
+        assert_eq!(seen, [0, 1, 2, 3, 4]);
+
+        let index = set.get_index(&3u32).unwrap();
+        assert_eq!(set.index(index), Some(&3));
+        assert_eq!(set.index(5), None);
+        // SAFETY: `get_index` returned this index, so it is in bounds.
+        assert_eq!(unsafe { set.index_unchecked(index) }, &3);
+
+        assert!(Set::<u32>::builder().build().is_empty());
+    }
+
+    #[test]
+    fn a_builder_reports_its_contents_and_capacity() {
+        let mut builder =
+            Set::<u32>::builder_with_capacity_and_hasher(50, DefaultHasherSeed::with_seed(2));
+        assert!(builder.is_empty());
+        assert!(builder.capacity() >= 50);
+        assert_eq!(builder.hasher().seed(), 2);
+
+        builder.insert(1);
+        builder.insert(2);
+        assert_eq!(builder.len(), 2);
+        assert_eq!(builder.iter().count(), 2);
+
+        builder.shrink_to(4);
+        assert!(builder.capacity() < 50);
+        builder.reserve(100);
+        assert!(builder.capacity() >= 100);
+        builder.shrink_to_fit();
+        assert!(builder.capacity() < 100);
+
+        builder.clear();
+        assert!(builder.is_empty());
+    }
+
+    #[test]
+    fn both_forms_iterate_by_reference_and_by_value() {
+        let set = set_of(0..3);
+
+        let mut borrowed = (&set).into_iter().copied().collect::<Vec<_>>();
+        borrowed.sort_unstable();
+        assert_eq!(borrowed, [0, 1, 2]);
+
+        let mut builder = Set::<u32>::builder();
+        builder.insert(7);
+        assert_eq!((&builder).into_iter().collect::<Vec<_>>(), [&7]);
+        assert_eq!(builder.into_iter().collect::<Vec<_>>(), [7]);
+
+        let mut owned = set.into_iter().collect::<Vec<_>>();
+        owned.sort_unstable();
+        assert_eq!(owned, [0, 1, 2]);
+    }
+
+    #[test]
+    fn cloning_and_formatting_reach_every_element() {
+        let set = set_of(0..3);
+
+        let mut clone = set.clone();
+        assert_eq!(clone.len(), 3);
+        clone.clone_from(&set);
+        assert!(clone.contains(&1u32));
+
+        // The order is arbitrary, so only the bracketing and the membership are pinned.
+        let shown = format!("{set:?}");
+        assert!(shown.starts_with('{') && shown.ends_with('}'), "{shown}");
+        for k in 0..3 {
+            assert!(shown.contains(&format!("{k}")), "{shown}");
+        }
+
+        let mut builder = Set::<u32>::builder();
+        builder.insert(1);
+        let mut builder_clone = builder.clone();
+        builder_clone.insert(2);
+        builder.clone_from(&builder_clone);
+        assert_eq!(builder.len(), 2);
+        assert!(format!("{builder:?}").contains('1'));
+    }
+}

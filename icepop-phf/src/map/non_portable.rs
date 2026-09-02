@@ -980,3 +980,186 @@ where
         builder
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Map;
+
+    use alloc::vec::Vec;
+
+    fn map_of(entries: impl IntoIterator<Item = (u32, u32)>) -> Map<u32, u32> {
+        let mut builder = Map::<u32, u32>::builder_with_hasher(DefaultHasherSeed::with_seed(1));
+        for (k, v) in entries {
+            builder.insert(k, v);
+        }
+        builder.build()
+    }
+
+    #[test]
+    fn every_constructor_reaches_the_same_builder() {
+        assert!(Map::<u32, u32>::builder().build().is_empty());
+        assert!(Map::<u32, u32>::builder_with_capacity(8).capacity() >= 8);
+        assert_eq!(
+            Map::<u32, u32>::builder_with_hasher(DefaultHasherSeed::with_seed(3))
+                .hasher()
+                .seed(),
+            3,
+        );
+        assert!(
+            Map::<u32, u32>::builder_with_capacity_and_hasher(8, DefaultHasherSeed::with_seed(3))
+                .capacity()
+                >= 8
+        );
+
+        assert!(Builder::<u32, u32>::new().build().is_empty());
+        assert!(Builder::<u32, u32>::with_capacity(8).capacity() >= 8);
+        assert_eq!(
+            Builder::<u32, u32>::with_hasher(DefaultHasherSeed::with_seed(3))
+                .hasher()
+                .seed(),
+            3,
+        );
+        assert!(
+            Builder::<u32, u32>::with_capacity_and_hasher(8, DefaultHasherSeed::with_seed(3))
+                .capacity()
+                >= 8
+        );
+
+        assert!(Map::<u32, u32>::default().is_empty());
+        assert!(Builder::<u32, u32>::default().build().is_empty());
+    }
+
+    #[test]
+    fn lookups_reach_keys_values_and_absent_entries() {
+        let mut map = map_of((0..8).map(|k| (k, k * 10)));
+
+        for k in 0..8u32 {
+            let index = map.get_index(&k).unwrap();
+            assert!(map.contains_key(&k));
+            assert_eq!(map.get(&k), Some(&(k * 10)));
+            assert_eq!(map.get_key_value(&k), Some((&k, &(k * 10))));
+
+            // SAFETY: the map is not empty.
+            unsafe {
+                assert_eq!(map.get_index_unchecked(&k), index);
+                assert_eq!(map.get_unchecked(&k), &(k * 10));
+                assert_eq!(map.get_key_value_unchecked(&k), (&k, &(k * 10)));
+            }
+        }
+
+        assert_eq!(map.get_index(&99u32), None);
+        assert!(!map.contains_key(&99u32));
+        assert_eq!(map.get(&99u32), None);
+        assert_eq!(map.get_key_value(&99u32), None);
+        assert_eq!(map.get_mut(&99u32), None);
+        assert_eq!(map.get_key_value_mut(&99u32), None);
+
+        *map.get_mut(&1u32).unwrap() = 1;
+        *map.get_key_value_mut(&1u32).unwrap().1 += 1;
+        // SAFETY: the map is not empty.
+        unsafe {
+            *map.get_unchecked_mut(&1u32) += 1;
+            *map.get_key_value_unchecked_mut(&1u32).1 += 1;
+        }
+        assert_eq!(map.get(&1u32), Some(&4));
+    }
+
+    #[test]
+    fn disjoint_accessors_borrow_several_values_at_once() {
+        let mut map = map_of((0..8).map(|k| (k, k * 10)));
+
+        let [a, b, missing] = map.get_disjoint_mut([&1u32, &2u32, &99u32]);
+        *a.unwrap() = 111;
+        *b.unwrap() = 222;
+        assert!(missing.is_none());
+
+        let [c, missing] = map.get_disjoint_key_value_mut([&3u32, &99u32]);
+        let (key, value) = c.unwrap();
+        assert_eq!(key, &3);
+        *value = 333;
+        assert!(missing.is_none());
+
+        // SAFETY: the keys are pairwise distinct, so they cannot share an entry.
+        let [d, e] = unsafe { map.get_disjoint_unchecked_mut([&4u32, &5u32]) };
+        *d.unwrap() = 444;
+        *e.unwrap() = 555;
+
+        // SAFETY: the keys are pairwise distinct, so they cannot share an entry.
+        let [f, g] = unsafe { map.get_disjoint_key_value_unchecked_mut([&6u32, &7u32]) };
+        *f.unwrap().1 = 666;
+        *g.unwrap().1 = 777;
+
+        for k in 1..8u32 {
+            assert_eq!(map.get(&k), Some(&(k * 111)));
+        }
+    }
+
+    #[test]
+    fn the_builder_inserts_updates_and_removes() {
+        let mut builder = Map::<u32, u32>::builder();
+
+        assert_eq!(builder.insert(1, 10), None);
+        assert_eq!(builder.insert(1, 11), Some(10));
+        assert!(builder.upsert(2, |old| {
+            assert_eq!(old, None);
+            20
+        }));
+        assert!(!builder.upsert(2, |old| old.unwrap() + 1));
+
+        assert!(builder.contains_key(&1u32));
+        assert_eq!(builder.get(&2u32), Some(&21));
+        assert_eq!(builder.get_key_value(&2u32), Some((&2, &21)));
+        assert_eq!(builder.get(&99u32), None);
+        assert!(!builder.contains_key(&99u32));
+        assert_eq!(builder.get_key_value(&99u32), None);
+
+        *builder.get_mut(&1u32).unwrap() = 12;
+        *builder.get_key_value_mut(&1u32).unwrap().1 += 1;
+        assert_eq!(builder.get(&1u32), Some(&13));
+
+        assert_eq!(*builder.get_or_insert_with(&3u32, || 30), 30);
+        assert_eq!(*builder.get_or_insert(&4u32, 40), 40);
+        assert_eq!(*builder.get_or_insert_default(&5u32), 0);
+        assert_eq!(*builder.get_or_insert(&4u32, 99), 40);
+
+        assert_eq!(builder.remove(&5u32), Some(0));
+        assert_eq!(builder.remove(&5u32), None);
+        assert_eq!(builder.remove_key_value(&4u32), Some((4, 40)));
+        assert_eq!(builder.remove_key_value(&4u32), None);
+        assert_eq!(builder.len(), 3);
+    }
+
+    #[test]
+    fn collecting_keeps_the_last_of_two_equal_keys() {
+        // `insert` semantics, matching the standard library's `HashMap`.
+        let map: Map<u32, u32> = [(1u32, 10u32), (2, 20), (1, 11)].into_iter().collect();
+        assert_eq!(map.get(&1u32), Some(&11));
+        assert_eq!(map.len(), 2);
+
+        let mut builder: Builder<u32, u32> = [(1u32, 10u32)].into_iter().collect();
+        builder.extend([(1u32, 99u32), (2, 20)]);
+        assert_eq!(builder.get(&1u32), Some(&99));
+        assert_eq!(builder.len(), 2);
+    }
+
+    #[test]
+    fn equality_compares_keys_and_values() {
+        let a = map_of((0..8).map(|k| (k, k * 10)));
+
+        assert_eq!(a, map_of((0..8).rev().map(|k| (k, k * 10))));
+        assert_ne!(a, map_of((0..7).map(|k| (k, k * 10))));
+        assert_ne!(
+            a,
+            map_of((0..8).map(|k| (k, if k == 3 { 99 } else { k * 10 })))
+        );
+
+        let mut ba: Builder<u32, u32> = [(1u32, 10u32)].into_iter().collect();
+        let bb: Builder<u32, u32> = [(1u32, 10u32)].into_iter().collect();
+        assert_eq!(ba, bb);
+        ba.insert(1, 11);
+        assert_ne!(ba, bb);
+
+        let _ = a.values().collect::<Vec<_>>();
+    }
+}

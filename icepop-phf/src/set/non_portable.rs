@@ -604,3 +604,129 @@ where
     S: BuildHasher,
 {
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Set;
+
+    use alloc::vec::Vec;
+
+    fn set_of(keys: impl IntoIterator<Item = u32>) -> Set<u32> {
+        let mut builder = Set::<u32>::builder_with_hasher(DefaultHasherSeed::with_seed(1));
+        for k in keys {
+            builder.insert(k);
+        }
+        builder.build()
+    }
+
+    #[test]
+    fn every_constructor_reaches_the_same_builder() {
+        assert!(Set::<u32>::builder().build().is_empty());
+        assert!(Set::<u32>::builder_with_capacity(8).capacity() >= 8);
+        assert_eq!(
+            Set::<u32>::builder_with_hasher(DefaultHasherSeed::with_seed(3))
+                .hasher()
+                .seed(),
+            3,
+        );
+        assert!(
+            Set::<u32>::builder_with_capacity_and_hasher(8, DefaultHasherSeed::with_seed(3))
+                .capacity()
+                >= 8
+        );
+
+        assert!(Builder::<u32>::new().build().is_empty());
+        assert!(Builder::<u32>::with_capacity(8).capacity() >= 8);
+        assert_eq!(
+            Builder::<u32>::with_hasher(DefaultHasherSeed::with_seed(3))
+                .hasher()
+                .seed(),
+            3,
+        );
+        assert!(
+            Builder::<u32>::with_capacity_and_hasher(8, DefaultHasherSeed::with_seed(3)).capacity()
+                >= 8
+        );
+
+        assert!(Set::<u32>::default().is_empty());
+        assert!(Builder::<u32>::default().build().is_empty());
+    }
+
+    #[test]
+    fn lookups_accept_a_borrowed_key() {
+        // `Equivalent` is what lets a `&str` address an owned `String` element.
+        let mut builder = Set::<alloc::string::String>::builder();
+        builder.insert("ash".into());
+        builder.insert("elm".into());
+        let set = builder.build();
+
+        let index = set.get_index("ash").unwrap();
+        assert!(set.contains("ash"));
+        assert_eq!(set.get("ash").map(|s| s.as_str()), Some("ash"));
+        assert_eq!(set.index(index).map(|s| s.as_str()), Some("ash"));
+        // SAFETY: the set is not empty.
+        unsafe {
+            assert_eq!(set.get_index_unchecked("ash"), index);
+            assert_eq!(set.get_unchecked("ash").as_str(), "ash");
+        }
+
+        assert_eq!(set.get_index("oak"), None);
+        assert!(!set.contains("oak"));
+        assert_eq!(set.get("oak"), None);
+    }
+
+    #[test]
+    fn the_builder_inserts_replaces_and_removes() {
+        let mut builder = Set::<u32>::builder();
+
+        assert!(builder.insert(1));
+        assert!(!builder.insert(1));
+        assert_eq!(builder.replace(1), Some(1));
+        assert_eq!(builder.get_or_insert(2), &2);
+        assert_eq!(builder.get_or_insert_with(&3u32, || 3), &3);
+
+        assert!(builder.contains(&1u32));
+        assert_eq!(builder.get(&2u32), Some(&2));
+        assert_eq!(builder.get(&99u32), None);
+        assert!(!builder.contains(&99u32));
+
+        assert_eq!(builder.take(&1u32), Some(1));
+        assert!(builder.remove(&2u32));
+        assert!(!builder.remove(&2u32));
+        assert_eq!(builder.len(), 1);
+    }
+
+    #[test]
+    fn collecting_keeps_the_first_of_two_equal_elements() {
+        let set: Set<u32> = [1u32, 2, 1].into_iter().collect();
+        assert_eq!(set.len(), 2);
+
+        let mut builder: Builder<u32> = [1u32, 2].into_iter().collect();
+        builder.extend([2u32, 3]);
+        assert_eq!(builder.len(), 3);
+    }
+
+    #[test]
+    fn equality_ignores_the_element_order_and_the_hasher() {
+        let a = set_of(0..8);
+        let mut b = Set::<u32>::builder_with_hasher(DefaultHasherSeed::with_seed(9));
+        for k in (0..8u32).rev() {
+            b.insert(k);
+        }
+
+        assert_eq!(a, b.build());
+        assert_ne!(a, set_of(0..7));
+        assert_ne!(a, set_of(1..9));
+
+        let mut ba = Set::<u32>::builder();
+        let mut bb = Set::<u32>::builder();
+        ba.insert(1);
+        bb.insert(1);
+        assert_eq!(ba, bb);
+        bb.insert(2);
+        assert_ne!(ba, bb);
+
+        let _ = a.iter().collect::<Vec<_>>();
+    }
+}

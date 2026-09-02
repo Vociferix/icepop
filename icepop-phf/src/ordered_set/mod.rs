@@ -464,3 +464,89 @@ impl<T, S, P> IntoIterator for Builder<T, S, P> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use alloc::format;
+    use alloc::vec::Vec;
+
+    const ORDER: [u32; 5] = [9, 3, 7, 1, 8];
+
+    fn set() -> OrderedSet<u32> {
+        let mut builder = OrderedSet::<u32>::builder_with_hasher(DefaultHasherSeed::with_seed(1));
+        for k in ORDER {
+            builder.insert(k);
+        }
+        builder.build()
+    }
+
+    #[test]
+    fn insertion_order_survives_the_build() {
+        let set = set();
+
+        assert_eq!(set.as_slice(), &ORDER);
+        assert_eq!(set.iter().copied().collect::<Vec<_>>(), ORDER);
+        assert_eq!((&set).into_iter().copied().collect::<Vec<_>>(), ORDER);
+        assert_eq!(set.clone().into_iter().collect::<Vec<_>>(), ORDER);
+
+        for (position, &k) in ORDER.iter().enumerate() {
+            assert_eq!(set.index(position), Some(&k));
+            assert_eq!(set.get_index(&k), Some(position));
+            // SAFETY: `position` is below the length.
+            assert_eq!(unsafe { set.index_unchecked(position) }, &k);
+        }
+        assert_eq!(set.index(ORDER.len()), None);
+    }
+
+    #[test]
+    fn a_built_set_reports_its_contents() {
+        let set = set();
+
+        assert_eq!(set.len(), 5);
+        assert!(!set.is_empty());
+        assert_eq!(set.hasher().seed(), 1);
+        assert!(OrderedSet::<u32>::builder().build().is_empty());
+
+        let shown = format!("{set:?}");
+        assert!(shown.starts_with('{') && shown.ends_with('}'), "{shown}");
+
+        let mut clone = set.clone();
+        clone.clone_from(&set);
+        assert_eq!(clone.as_slice(), &ORDER);
+    }
+
+    #[test]
+    fn a_builder_keeps_order_and_reports_its_capacity() {
+        let mut builder = OrderedSet::<u32>::builder_with_capacity_and_hasher(
+            50,
+            DefaultHasherSeed::with_seed(2),
+        );
+        assert!(builder.is_empty());
+        assert!(builder.capacity() >= 50);
+        assert_eq!(builder.hasher().seed(), 2);
+
+        for k in ORDER {
+            builder.insert(k);
+        }
+        assert_eq!(builder.len(), 5);
+        assert_eq!(builder.iter().copied().collect::<Vec<_>>(), ORDER);
+        assert_eq!((&builder).into_iter().copied().collect::<Vec<_>>(), ORDER);
+
+        builder.shrink_to(8);
+        assert!(builder.capacity() < 50);
+        builder.reserve(100);
+        assert!(builder.capacity() >= 100);
+        builder.shrink_to_fit();
+        assert!(builder.capacity() < 100);
+
+        let mut clone = builder.clone();
+        clone.clone_from(&builder);
+        assert!(format!("{clone:?}").contains('9'));
+        assert_eq!(clone.into_iter().collect::<Vec<_>>(), ORDER);
+
+        builder.clear();
+        assert!(builder.is_empty());
+    }
+}

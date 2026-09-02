@@ -967,3 +967,229 @@ where
         self.table.serialize_map(serializer)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::PortableOrderedMap;
+
+    use alloc::format;
+    use alloc::vec::Vec;
+    use rkyv::rancor::Error;
+    use rkyv::seal::Seal;
+
+    type Archived = ArchivedOrderedMap<u32, u32>;
+
+    fn bytes_of(entries: impl IntoIterator<Item = (u32, u32)>) -> rkyv::util::AlignedVec {
+        let mut builder =
+            PortableOrderedMap::<u32, u32>::builder_with_hasher(DefaultHasherSeed::with_seed(1));
+        for (k, v) in entries {
+            builder.insert(k, v);
+        }
+        rkyv::to_bytes::<Error>(&builder.build()).unwrap()
+    }
+
+    fn sorted<T: Ord>(iter: impl IntoIterator<Item = T>) -> Vec<T> {
+        let mut all = iter.into_iter().collect::<Vec<_>>();
+        all.sort();
+        all
+    }
+
+    #[test]
+    fn an_archived_map_answers_every_read() {
+        let bytes = bytes_of((0..8).map(|k| (k, k * 10)));
+        let archived = rkyv::access::<Archived, Error>(&bytes).unwrap();
+
+        assert_eq!(archived.len(), 8);
+        assert!(!archived.is_empty());
+        assert_eq!(archived.hasher().seed(), 1);
+        assert_eq!(archived.as_slice().len(), 8);
+        assert_eq!(archived.into_iter().count(), 8);
+        assert_eq!(
+            sorted(archived.keys().map(|k| k.to_native())),
+            [0, 1, 2, 3, 4, 5, 6, 7]
+        );
+        assert_eq!(
+            sorted(archived.values().map(|v| v.to_native())),
+            [0, 10, 20, 30, 40, 50, 60, 70],
+        );
+        assert_eq!(
+            sorted(archived.iter().map(|(k, v)| (k.to_native(), v.to_native()))),
+            sorted((0..8u32).map(|k| (k, k * 10))),
+        );
+
+        for k in 0..8u32 {
+            let index = archived.get_index(&k).unwrap();
+            assert!(archived.contains_key(&k));
+            assert_eq!(archived.get(&k).unwrap().to_native(), k * 10);
+            let (key, value) = archived.get_key_value(&k).unwrap();
+            assert_eq!((key.to_native(), value.to_native()), (k, k * 10));
+            let (key, value) = archived.index(index).unwrap();
+            assert_eq!((key.to_native(), value.to_native()), (k, k * 10));
+
+            // SAFETY: the archive is not empty and `index` came from `get_index`.
+            unsafe {
+                assert_eq!(archived.get_index_unchecked(&k), index);
+                assert_eq!(archived.get_unchecked(&k).to_native(), k * 10);
+                let (key, value) = archived.get_key_value_unchecked(&k);
+                assert_eq!((key.to_native(), value.to_native()), (k, k * 10));
+                let (key, value) = archived.index_unchecked(index);
+                assert_eq!((key.to_native(), value.to_native()), (k, k * 10));
+            }
+        }
+
+        assert_eq!(archived.get_index(&99u32), None);
+        assert!(!archived.contains_key(&99u32));
+        assert!(archived.get(&99u32).is_none());
+        assert!(archived.get_key_value(&99u32).is_none());
+        assert!(archived.index(8).is_none());
+
+        let shown = format!("{archived:?}");
+        assert!(shown.starts_with('{') && shown.ends_with('}'), "{shown}");
+    }
+
+    #[test]
+    fn every_sealed_accessor_rewrites_a_value_and_leaves_the_key_alone() {
+        let mut bytes = bytes_of((0..8).map(|k| (k, k * 10)));
+
+        macro_rules! with_seal {
+            (|$archived:ident| $body:expr) => {{
+                let $archived = rkyv::access_mut::<Archived, Error>(&mut bytes).unwrap();
+                $body
+            }};
+        }
+
+        with_seal!(|a| {
+            let value = Archived::get_seal(a, &1u32).unwrap();
+            *Seal::unseal(value) = 111.into();
+        });
+        with_seal!(|a| {
+            let (key, value) = Archived::get_key_value_seal(a, &2u32).unwrap();
+            assert_eq!(key.to_native(), 2);
+            *Seal::unseal(value) = 222.into();
+        });
+        with_seal!(|a| {
+            let index = a.get_index(&3u32).unwrap();
+            let (key, value) = Archived::index_seal(a, index).unwrap();
+            assert_eq!(key.to_native(), 3);
+            *Seal::unseal(value) = 333.into();
+        });
+        with_seal!(|a| {
+            // SAFETY: the archive is not empty.
+            let value = unsafe { Archived::get_unchecked_seal(a, &4u32) };
+            *Seal::unseal(value) = 444.into();
+        });
+        with_seal!(|a| {
+            // SAFETY: the archive is not empty.
+            let (_, value) = unsafe { Archived::get_key_value_unchecked_seal(a, &5u32) };
+            *Seal::unseal(value) = 555.into();
+        });
+        with_seal!(|a| {
+            let index = a.get_index(&6u32).unwrap();
+            // SAFETY: `index` came from `get_index`, so it is in bounds.
+            let (_, value) = unsafe { Archived::index_unchecked_seal(a, index) };
+            *Seal::unseal(value) = 666.into();
+        });
+        with_seal!(|a| {
+            for (key, value) in Archived::iter_seal(a) {
+                if key.to_native() == 7 {
+                    *Seal::unseal(value) = 777.into();
+                }
+            }
+        });
+
+        let archived = rkyv::access::<Archived, Error>(&bytes).unwrap();
+        for k in 1..8u32 {
+            assert_eq!(archived.get(&k).unwrap().to_native(), k * 111);
+        }
+        // Keys are handed out shared, so none of that could have moved an entry.
+        assert_eq!(
+            sorted(archived.keys().map(|k| k.to_native())),
+            [0, 1, 2, 3, 4, 5, 6, 7]
+        );
+
+        let a = rkyv::access_mut::<Archived, Error>(&mut bytes).unwrap();
+        for value in Archived::values_seal(a) {
+            *Seal::unseal(value) = 0.into();
+        }
+        let archived = rkyv::access::<Archived, Error>(&bytes).unwrap();
+        assert!(archived.values().all(|v| v.to_native() == 0));
+
+        let a = rkyv::access_mut::<Archived, Error>(&mut bytes).unwrap();
+        assert!(Archived::get_seal(a, &99u32).is_none());
+        let a = rkyv::access_mut::<Archived, Error>(&mut bytes).unwrap();
+        assert!(Archived::get_key_value_seal(a, &99u32).is_none());
+        let a = rkyv::access_mut::<Archived, Error>(&mut bytes).unwrap();
+        assert!(Archived::index_seal(a, 8).is_none());
+    }
+
+    #[test]
+    fn disjoint_seals_borrow_several_values_at_once() {
+        let mut bytes = bytes_of((0..8).map(|k| (k, k * 10)));
+
+        {
+            let a = rkyv::access_mut::<Archived, Error>(&mut bytes).unwrap();
+            let [x, y, missing] = Archived::get_disjoint_seal(a, [&1u32, &2u32, &99u32]);
+            *Seal::unseal(x.unwrap()) = 111.into();
+            *Seal::unseal(y.unwrap()) = 222.into();
+            assert!(missing.is_none());
+        }
+        {
+            let a = rkyv::access_mut::<Archived, Error>(&mut bytes).unwrap();
+            let [x, missing] = Archived::get_disjoint_key_value_seal(a, [&3u32, &99u32]);
+            let (key, value) = x.unwrap();
+            assert_eq!(key.to_native(), 3);
+            *Seal::unseal(value) = 333.into();
+            assert!(missing.is_none());
+        }
+        {
+            let a = rkyv::access_mut::<Archived, Error>(&mut bytes).unwrap();
+            // SAFETY: the keys are pairwise distinct, so they cannot share an entry.
+            let [x, y] = unsafe { Archived::get_disjoint_unchecked_seal(a, [&4u32, &5u32]) };
+            *Seal::unseal(x.unwrap()) = 444.into();
+            *Seal::unseal(y.unwrap()) = 555.into();
+        }
+        {
+            let a = rkyv::access_mut::<Archived, Error>(&mut bytes).unwrap();
+            // SAFETY: the keys are pairwise distinct, so they cannot share an entry.
+            let [x, y] =
+                unsafe { Archived::get_disjoint_key_value_unchecked_seal(a, [&6u32, &7u32]) };
+            *Seal::unseal(x.unwrap().1) = 666.into();
+            *Seal::unseal(y.unwrap().1) = 777.into();
+        }
+
+        let archived = rkyv::access::<Archived, Error>(&bytes).unwrap();
+        for k in 1..8u32 {
+            assert_eq!(archived.get(&k).unwrap().to_native(), k * 111);
+        }
+    }
+
+    #[test]
+    fn an_archive_round_trips_back_to_a_live_map() {
+        let bytes = bytes_of((0..8).map(|k| (k, k * 10)));
+        let archived = rkyv::access::<Archived, Error>(&bytes).unwrap();
+
+        let map: PortableOrderedMap<u32, u32> = rkyv::deserialize::<_, Error>(archived).unwrap();
+
+        assert_eq!(map.len(), 8);
+        assert_eq!(map.hasher().seed(), 1);
+        for k in 0..8u32 {
+            assert_eq!(map.get(&k), Some(&(k * 10)));
+        }
+    }
+
+    #[test]
+    fn archived_equality_compares_keys_and_values() {
+        let a = bytes_of((0..8).map(|k| (k, k * 10)));
+        let b = bytes_of((0..8).rev().map(|k| (k, k * 10)));
+        let differing = bytes_of((0..8).map(|k| (k, if k == 3 { 99 } else { k * 10 })));
+
+        let aa = rkyv::access::<Archived, Error>(&a).unwrap();
+        let ab = rkyv::access::<Archived, Error>(&b).unwrap();
+        let ad = rkyv::access::<Archived, Error>(&differing).unwrap();
+
+        // An ordered map compares entry order too, so the reversed build differs.
+        assert_ne!(aa, ab);
+        assert_ne!(aa, ad);
+    }
+}

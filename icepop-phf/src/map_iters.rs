@@ -1130,6 +1130,15 @@ impl<K: rkyv::Archive, V: rkyv::Archive> ExactSizeIterator for ArchivedValues<'_
 impl<K: rkyv::Archive, V: rkyv::Archive> core::iter::FusedIterator for ArchivedValues<'_, K, V> {}
 
 #[cfg(feature = "rkyv")]
+impl<K: rkyv::Archive, V: rkyv::Archive> Clone for ArchivedValues<'_, K, V> {
+    fn clone(&self) -> Self {
+        Self {
+            iter: self.iter.clone(),
+        }
+    }
+}
+
+#[cfg(feature = "rkyv")]
 impl<K: rkyv::Archive, V: rkyv::Archive> fmt::Debug for ArchivedValues<'_, K, V>
 where
     V::Archived: fmt::Debug,
@@ -1227,5 +1236,425 @@ where
         f.debug_list()
             .entries(self.iter.as_slice().iter().map(|entry| &entry.1))
             .finish()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::OrderedMap;
+
+    use alloc::format;
+    use alloc::vec::Vec;
+
+    /// Every method below is overridden rather than taken from `Iterator`'s defaults, so each
+    /// one has to be exercised to catch a delegation that reaches the wrong half of an entry.
+    const ORDER: [(u32, u32); 5] = [(9, 90), (3, 30), (7, 70), (1, 10), (8, 80)];
+    const KEYS: [u32; 5] = [9, 3, 7, 1, 8];
+    const VALUES: [u32; 5] = [90, 30, 70, 10, 80];
+
+    fn map() -> OrderedMap<u32, u32> {
+        ORDER.into_iter().collect()
+    }
+
+    #[test]
+    fn the_entry_iterators_delegate_every_override() {
+        let map = map();
+
+        assert_eq!(map.iter().size_hint(), (5, Some(5)));
+        assert_eq!(map.iter().len(), 5);
+        assert_eq!(map.iter().count(), 5);
+        assert_eq!(map.iter().last(), Some((&8, &80)));
+        assert_eq!(map.iter().nth(2), Some((&7, &70)));
+        assert_eq!(map.iter().nth(9), None);
+        assert_eq!(map.iter().fold(0u32, |acc, (k, _)| acc * 10 + k), 93718);
+        assert_eq!(
+            map.iter().rev().map(|(k, _)| *k).collect::<Vec<_>>(),
+            [8, 1, 7, 3, 9]
+        );
+        assert_eq!(map.iter().nth_back(1), Some((&1, &10)));
+        assert_eq!(map.iter().nth_back(9), None);
+        assert_eq!(map.iter().rfold(0u32, |acc, (k, _)| acc * 10 + k), 81739);
+
+        let mut iter = map.iter();
+        iter.next();
+        assert_eq!(iter.len(), 4);
+        assert_eq!(
+            iter.clone().map(|(k, _)| *k).collect::<Vec<_>>(),
+            [3, 7, 1, 8]
+        );
+        assert!(format!("{iter:?}").contains("30"));
+
+        assert_eq!(map.clone().into_iter().size_hint(), (5, Some(5)));
+        assert_eq!(map.clone().into_iter().len(), 5);
+        assert_eq!(map.clone().into_iter().count(), 5);
+        assert_eq!(map.clone().into_iter().last(), Some((8, 80)));
+        assert_eq!(map.clone().into_iter().nth(2), Some((7, 70)));
+        assert_eq!(map.clone().into_iter().nth(9), None);
+        assert_eq!(
+            map.clone()
+                .into_iter()
+                .fold(0u32, |acc, (k, _)| acc * 10 + k),
+            93718
+        );
+        assert_eq!(map.clone().into_iter().rev().collect::<Vec<_>>().len(), 5);
+        assert_eq!(map.clone().into_iter().nth_back(1), Some((1, 10)));
+        assert_eq!(map.clone().into_iter().nth_back(9), None);
+        assert_eq!(
+            map.clone()
+                .into_iter()
+                .rfold(0u32, |acc, (k, _)| acc * 10 + k),
+            81739
+        );
+
+        let mut iter = map.into_iter();
+        iter.next();
+        assert_eq!(iter.len(), 4);
+        assert_eq!(
+            iter.clone().map(|(k, _)| k).collect::<Vec<_>>(),
+            [3, 7, 1, 8]
+        );
+        assert!(format!("{iter:?}").contains("30"));
+    }
+
+    #[test]
+    fn the_mutable_entry_iterator_delegates_every_override() {
+        let mut map = map();
+
+        assert_eq!(map.iter_mut().size_hint(), (5, Some(5)));
+        assert_eq!(map.iter_mut().len(), 5);
+        assert_eq!(map.iter_mut().count(), 5);
+        assert_eq!(map.iter_mut().last().map(|(k, v)| (*k, *v)), Some((8, 80)));
+        assert_eq!(map.iter_mut().nth(2).map(|(k, v)| (*k, *v)), Some((7, 70)));
+        assert!(map.iter_mut().nth(9).is_none());
+        assert_eq!(map.iter_mut().fold(0u32, |acc, (k, _)| acc * 10 + k), 93718);
+        assert_eq!(
+            map.iter_mut().rev().map(|(k, _)| *k).collect::<Vec<_>>(),
+            [8, 1, 7, 3, 9]
+        );
+        assert_eq!(
+            map.iter_mut().nth_back(1).map(|(k, v)| (*k, *v)),
+            Some((1, 10))
+        );
+        assert!(map.iter_mut().nth_back(9).is_none());
+        assert_eq!(
+            map.iter_mut().rfold(0u32, |acc, (k, _)| acc * 10 + k),
+            81739
+        );
+
+        let mut iter = map.iter_mut();
+        iter.next();
+        assert_eq!(iter.len(), 4);
+        assert!(format!("{iter:?}").contains("30"));
+
+        // The values are genuinely writable through it.
+        for (_, value) in map.iter_mut() {
+            *value += 1;
+        }
+        assert_eq!(map.get(&9u32), Some(&91));
+    }
+
+    #[test]
+    fn the_key_iterators_yield_keys_and_the_value_iterators_yield_values() {
+        let map = map();
+
+        assert_eq!(map.keys().size_hint(), (5, Some(5)));
+        assert_eq!(map.keys().len(), 5);
+        assert_eq!(map.keys().count(), 5);
+        assert_eq!(map.keys().last(), Some(&8));
+        assert_eq!(map.keys().nth(2), Some(&7));
+        assert_eq!(map.keys().nth(9), None);
+        assert_eq!(map.keys().fold(0u32, |acc, k| acc * 10 + k), 93718);
+        assert_eq!(map.keys().rev().collect::<Vec<_>>(), [&8, &1, &7, &3, &9]);
+        assert_eq!(map.keys().nth_back(1), Some(&1));
+        assert_eq!(map.keys().nth_back(9), None);
+        assert_eq!(map.keys().rfold(0u32, |acc, k| acc * 10 + k), 81739);
+
+        let mut keys = map.keys();
+        keys.next();
+        assert_eq!(keys.len(), 4);
+        assert_eq!(keys.clone().collect::<Vec<_>>(), [&3, &7, &1, &8]);
+        assert!(format!("{keys:?}").contains('3'));
+
+        assert_eq!(map.values().size_hint(), (5, Some(5)));
+        assert_eq!(map.values().len(), 5);
+        assert_eq!(map.values().count(), 5);
+        assert_eq!(map.values().last(), Some(&80));
+        assert_eq!(map.values().nth(2), Some(&70));
+        assert_eq!(map.values().nth(9), None);
+        assert_eq!(map.values().fold(0u32, |acc, v| acc * 3 + v), 8840);
+        assert_eq!(
+            map.values().rev().collect::<Vec<_>>(),
+            [&80, &10, &70, &30, &90]
+        );
+        assert_eq!(map.values().nth_back(1), Some(&10));
+        assert_eq!(map.values().nth_back(9), None);
+        assert_eq!(map.values().rfold(0u32, |acc, v| acc + v), 280);
+
+        let mut values = map.values();
+        values.next();
+        assert_eq!(values.len(), 4);
+        assert_eq!(values.clone().collect::<Vec<_>>(), [&30, &70, &10, &80]);
+        assert!(format!("{values:?}").contains("30"));
+
+        assert_eq!(map.clone().into_keys().collect::<Vec<_>>(), KEYS);
+        assert_eq!(map.into_values().collect::<Vec<_>>(), VALUES);
+    }
+
+    #[test]
+    fn the_owning_key_and_value_iterators_delegate_every_override() {
+        assert_eq!(map().into_keys().size_hint(), (5, Some(5)));
+        assert_eq!(map().into_keys().len(), 5);
+        assert_eq!(map().into_keys().count(), 5);
+        assert_eq!(map().into_keys().last(), Some(8));
+        assert_eq!(map().into_keys().nth(2), Some(7));
+        assert_eq!(map().into_keys().nth(9), None);
+        assert_eq!(map().into_keys().fold(0u32, |acc, k| acc * 10 + k), 93718);
+        assert_eq!(map().into_keys().rev().collect::<Vec<_>>(), [8, 1, 7, 3, 9]);
+        assert_eq!(map().into_keys().nth_back(1), Some(1));
+        assert_eq!(map().into_keys().nth_back(9), None);
+        assert_eq!(map().into_keys().rfold(0u32, |acc, k| acc * 10 + k), 81739);
+
+        let mut keys = map().into_keys();
+        keys.next();
+        assert_eq!(keys.len(), 4);
+        assert_eq!(keys.clone().collect::<Vec<_>>(), [3, 7, 1, 8]);
+        assert!(format!("{keys:?}").contains('3'));
+
+        assert_eq!(map().into_values().size_hint(), (5, Some(5)));
+        assert_eq!(map().into_values().len(), 5);
+        assert_eq!(map().into_values().count(), 5);
+        assert_eq!(map().into_values().last(), Some(80));
+        assert_eq!(map().into_values().nth(2), Some(70));
+        assert_eq!(map().into_values().nth(9), None);
+        assert_eq!(map().into_values().fold(0u32, |acc, v| acc * 3 + v), 8840);
+        assert_eq!(
+            map().into_values().rev().collect::<Vec<_>>(),
+            [80, 10, 70, 30, 90]
+        );
+        assert_eq!(map().into_values().nth_back(1), Some(10));
+        assert_eq!(map().into_values().nth_back(9), None);
+        assert_eq!(map().into_values().rfold(0u32, |acc, v| acc + v), 280);
+
+        let mut values = map().into_values();
+        values.next();
+        assert_eq!(values.len(), 4);
+        assert_eq!(values.clone().collect::<Vec<_>>(), [30, 70, 10, 80]);
+        assert!(format!("{values:?}").contains("30"));
+    }
+
+    #[test]
+    fn the_mutable_value_iterator_delegates_every_override() {
+        let mut map = map();
+
+        assert_eq!(map.values_mut().size_hint(), (5, Some(5)));
+        assert_eq!(map.values_mut().len(), 5);
+        assert_eq!(map.values_mut().count(), 5);
+        assert_eq!(map.values_mut().last().copied(), Some(80));
+        assert_eq!(map.values_mut().nth(2).copied(), Some(70));
+        assert!(map.values_mut().nth(9).is_none());
+        assert_eq!(map.values_mut().fold(0u32, |acc, v| acc + *v), 280);
+        assert_eq!(
+            map.values_mut().rev().map(|v| *v).collect::<Vec<_>>(),
+            [80, 10, 70, 30, 90]
+        );
+        assert_eq!(map.values_mut().nth_back(1).copied(), Some(10));
+        assert!(map.values_mut().nth_back(9).is_none());
+        assert_eq!(map.values_mut().rfold(0u32, |acc, v| acc + *v), 280);
+
+        let mut values = map.values_mut();
+        values.next();
+        assert_eq!(values.len(), 4);
+        assert!(format!("{values:?}").contains("30"));
+
+        for value in map.values_mut() {
+            *value += 1;
+        }
+        assert_eq!(map.get(&9u32), Some(&91));
+    }
+
+    #[cfg(feature = "rkyv")]
+    #[test]
+    fn the_archived_iterators_delegate_every_override() {
+        use crate::{PortableOrderedMap, rkyv::ArchivedOrderedMap};
+        use rkyv::rancor::Error;
+        use rkyv::seal::Seal;
+
+        let map: PortableOrderedMap<u32, u32> = ORDER.into_iter().collect();
+        let mut bytes = rkyv::to_bytes::<Error>(&map).unwrap();
+        let archived = rkyv::access::<ArchivedOrderedMap<u32, u32>, Error>(&bytes).unwrap();
+
+        let native = |v: &rkyv::rend::u32_le| v.to_native();
+
+        assert_eq!(archived.iter().size_hint(), (5, Some(5)));
+        assert_eq!(archived.iter().len(), 5);
+        assert_eq!(archived.iter().count(), 5);
+        assert_eq!(archived.iter().last().map(|(k, _)| native(k)), Some(8));
+        assert_eq!(archived.iter().nth(2).map(|(k, _)| native(k)), Some(7));
+        assert!(archived.iter().nth(9).is_none());
+        assert_eq!(
+            archived
+                .iter()
+                .fold(0u32, |acc, (k, _)| acc * 10 + native(k)),
+            93718
+        );
+        assert_eq!(
+            archived
+                .iter()
+                .rev()
+                .map(|(k, _)| native(k))
+                .collect::<Vec<_>>(),
+            [8, 1, 7, 3, 9]
+        );
+        assert_eq!(archived.iter().nth_back(1).map(|(k, _)| native(k)), Some(1));
+        assert!(archived.iter().nth_back(9).is_none());
+        assert_eq!(
+            archived
+                .iter()
+                .rfold(0u32, |acc, (k, _)| acc * 10 + native(k)),
+            81739
+        );
+
+        let mut iter = archived.iter();
+        iter.next();
+        assert_eq!(iter.len(), 4);
+        assert_eq!(
+            iter.clone().map(|(k, _)| native(k)).collect::<Vec<_>>(),
+            [3, 7, 1, 8]
+        );
+        assert!(format!("{iter:?}").contains("30"));
+
+        assert_eq!(archived.keys().size_hint(), (5, Some(5)));
+        assert_eq!(archived.keys().len(), 5);
+        assert_eq!(archived.keys().count(), 5);
+        assert_eq!(archived.keys().last().map(native), Some(8));
+        assert_eq!(archived.keys().nth(2).map(native), Some(7));
+        assert!(archived.keys().nth(9).is_none());
+        assert_eq!(
+            archived.keys().fold(0u32, |acc, k| acc * 10 + native(k)),
+            93718
+        );
+        assert_eq!(
+            archived.keys().rev().map(native).collect::<Vec<_>>(),
+            [8, 1, 7, 3, 9]
+        );
+        assert_eq!(archived.keys().nth_back(1).map(native), Some(1));
+        assert!(archived.keys().nth_back(9).is_none());
+        assert_eq!(
+            archived.keys().rfold(0u32, |acc, k| acc * 10 + native(k)),
+            81739
+        );
+        let mut keys = archived.keys();
+        keys.next();
+        assert_eq!(keys.clone().map(native).collect::<Vec<_>>(), [3, 7, 1, 8]);
+        assert!(format!("{keys:?}").contains('3'));
+
+        assert_eq!(archived.values().size_hint(), (5, Some(5)));
+        assert_eq!(archived.values().len(), 5);
+        assert_eq!(archived.values().count(), 5);
+        assert_eq!(archived.values().last().map(native), Some(80));
+        assert_eq!(archived.values().nth(2).map(native), Some(70));
+        assert!(archived.values().nth(9).is_none());
+        assert_eq!(archived.values().fold(0u32, |acc, v| acc + native(v)), 280);
+        assert_eq!(
+            archived.values().rev().map(native).collect::<Vec<_>>(),
+            [80, 10, 70, 30, 90]
+        );
+        assert_eq!(archived.values().nth_back(1).map(native), Some(10));
+        assert!(archived.values().nth_back(9).is_none());
+        assert_eq!(archived.values().rfold(0u32, |acc, v| acc + native(v)), 280);
+        let mut values = archived.values();
+        values.next();
+        assert_eq!(values.len(), 4);
+        assert_eq!(
+            values.clone().map(native).collect::<Vec<_>>(),
+            [30, 70, 10, 80]
+        );
+        assert!(format!("{values:?}").contains("30"));
+
+        // The sealed iterators reach the same entries, with the values writable.
+        type Archived = ArchivedOrderedMap<u32, u32>;
+        {
+            let a = rkyv::access_mut::<Archived, Error>(&mut bytes).unwrap();
+            let mut iter = Archived::iter_seal(a);
+            assert_eq!(iter.size_hint(), (5, Some(5)));
+            assert_eq!(iter.len(), 5);
+            assert_eq!(iter.next().map(|(k, _)| native(k)), Some(9));
+            assert_eq!(iter.nth(1).map(|(k, _)| native(k)), Some(7));
+            assert_eq!(iter.next_back().map(|(k, _)| native(k)), Some(8));
+            assert!(format!("{iter:?}").contains("10"));
+            assert_eq!(iter.count(), 1);
+        }
+        {
+            let a = rkyv::access_mut::<Archived, Error>(&mut bytes).unwrap();
+            assert_eq!(
+                Archived::iter_seal(a).nth_back(1).map(|(k, _)| native(k)),
+                Some(1)
+            );
+        }
+        {
+            let a = rkyv::access_mut::<Archived, Error>(&mut bytes).unwrap();
+            assert_eq!(
+                Archived::iter_seal(a).rfold(0u32, |acc, (k, _)| acc * 10 + native(k)),
+                81739,
+            );
+        }
+        {
+            let a = rkyv::access_mut::<Archived, Error>(&mut bytes).unwrap();
+            assert_eq!(
+                Archived::iter_seal(a).fold(0u32, |acc, (k, _)| acc * 10 + native(k)),
+                93718,
+            );
+        }
+        {
+            let a = rkyv::access_mut::<Archived, Error>(&mut bytes).unwrap();
+            assert_eq!(
+                Archived::iter_seal(a).last().map(|(k, _)| native(k)),
+                Some(8)
+            );
+        }
+        {
+            let a = rkyv::access_mut::<Archived, Error>(&mut bytes).unwrap();
+            let mut values = Archived::values_seal(a);
+            assert_eq!(values.size_hint(), (5, Some(5)));
+            assert_eq!(values.len(), 5);
+            assert_eq!(values.next().map(|v| *Seal::unseal(v)), Some(90.into()));
+            assert_eq!(values.nth(1).map(|v| *Seal::unseal(v)), Some(70.into()));
+            assert_eq!(
+                values.next_back().map(|v| *Seal::unseal(v)),
+                Some(80.into())
+            );
+            assert!(format!("{values:?}").contains("10"));
+            assert_eq!(values.count(), 1);
+        }
+        {
+            let a = rkyv::access_mut::<Archived, Error>(&mut bytes).unwrap();
+            assert_eq!(
+                Archived::values_seal(a)
+                    .nth_back(1)
+                    .map(|v| *Seal::unseal(v)),
+                Some(10.into()),
+            );
+        }
+        {
+            let a = rkyv::access_mut::<Archived, Error>(&mut bytes).unwrap();
+            assert_eq!(
+                Archived::values_seal(a).rfold(0u32, |acc, v| acc + Seal::unseal(v).to_native()),
+                280,
+            );
+        }
+        {
+            let a = rkyv::access_mut::<Archived, Error>(&mut bytes).unwrap();
+            assert_eq!(
+                Archived::values_seal(a).fold(0u32, |acc, v| acc + Seal::unseal(v).to_native()),
+                280,
+            );
+        }
+        {
+            let a = rkyv::access_mut::<Archived, Error>(&mut bytes).unwrap();
+            assert_eq!(
+                Archived::values_seal(a).last().map(|v| *Seal::unseal(v)),
+                Some(80.into()),
+            );
+        }
     }
 }

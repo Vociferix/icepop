@@ -495,6 +495,20 @@ impl From<DefaultHasherSeed> for ArchivedDefaultHasherSeed {
     }
 }
 
+#[cfg(all(feature = "rkyv-0_8", feature = "serde"))]
+impl serde::Serialize for ArchivedDefaultHasherSeed {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct;
+
+        let mut ser = serializer.serialize_struct("DefaultHasherSeed", 1)?;
+        ser.serialize_field("seed", &self.seed.to_native())?;
+        ser.end()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{DefaultHasher, DefaultHasherSeed};

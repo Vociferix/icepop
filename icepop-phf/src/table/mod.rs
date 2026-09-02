@@ -436,6 +436,26 @@ where
     }
 }
 
+// Hand-written rather than derived: a derive would demand `O: Debug` and `P: Debug` of the
+// marker types, which carry no data and implement nothing.
+impl<O, S, P> core::fmt::Debug for Table<O, S, P>
+where
+    O: TableOps,
+    O::Entry: core::fmt::Debug,
+    O::Indices: core::fmt::Debug,
+    S: core::fmt::Debug,
+{
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Table")
+            .field("global_param", &self.global_param)
+            .field("params", &self.params)
+            .field("indices", &self.indices)
+            .field("entries", &self.entries)
+            .field("hasher_builder", &self.hasher_builder)
+            .finish()
+    }
+}
+
 impl<O, S, P> Default for Table<O, S, P>
 where
     O: TableOps,
@@ -739,7 +759,7 @@ where
                         Field::Indices => {
                             return Err(serde::de::Error::unknown_field(
                                 "indices",
-                                &["params", "entries", "hasher"],
+                                &["hasher", "entries", "global_param", "params"],
                             ));
                         }
                         Field::Entries => {
@@ -807,5 +827,472 @@ where
             },
             Visitor(core::marker::PhantomData),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::portability::{MapOps, SetOps};
+    use crate::table::Builder;
+
+    use alloc::format;
+    use alloc::vec::Vec;
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+
+    type SetTable = Table<SetOps<u32>, DefaultHasherSeed, NonPortable>;
+    type MapTable = Table<MapOps<u32, u32>, DefaultHasherSeed, NonPortable>;
+
+    fn set_of(keys: impl IntoIterator<Item = u32>) -> SetTable {
+        let mut builder: Builder<SetOps<u32>, _, NonPortable> =
+            Builder::with_hasher(DefaultHasherSeed::with_seed(1));
+        for k in keys {
+            builder.insert(k);
+        }
+        builder.build()
+    }
+
+    fn map_of(entries: impl IntoIterator<Item = (u32, u32)>) -> MapTable {
+        let mut builder: Builder<MapOps<u32, u32>, _, NonPortable> =
+            Builder::with_hasher(DefaultHasherSeed::with_seed(1));
+        for (k, v) in entries {
+            builder.map_insert(k, v);
+        }
+        builder.build()
+    }
+
+    #[test]
+    fn an_empty_table_answers_every_query_without_touching_an_entry() {
+        // Every lookup has to short-circuit here: the unchecked path divides by the entry count.
+        let table = SetTable::default();
+
+        assert!(table.is_empty());
+        assert_eq!(table.len(), 0);
+        assert_eq!(table.get_index(&1u32), None);
+        assert!(!table.contains(&1u32));
+        assert_eq!(table.get(&1u32), None);
+        assert!(table.as_slice().is_empty());
+        assert_eq!(table.index(0), None);
+
+        let mut table = table;
+        assert_eq!(table.get_mut(&1u32), None);
+        assert_eq!(table.index_mut(0), None);
+    }
+
+    #[test]
+    fn an_absent_key_still_resolves_to_an_entry_that_is_then_rejected() {
+        let table = set_of(0..8);
+
+        // The hash rounds always land somewhere, so the checked accessors are what turn a
+        // missing key into `None`.
+        for probe in [100u32, 101, 4242] {
+            // SAFETY: the table is not empty.
+            let index = unsafe { table.get_index_unchecked(&probe) };
+            assert!(
+                index < table.len(),
+                "{index} out of bounds for an absent key"
+            );
+
+            assert_eq!(table.get_index(&probe), None);
+            assert!(!table.contains(&probe));
+            assert_eq!(table.get(&probe), None);
+        }
+    }
+
+    #[test]
+    fn entry_accessors_agree_with_their_unchecked_counterparts() {
+        let mut table = set_of(0..8);
+
+        for k in 0..8u32 {
+            let index = table.get_index(&k).unwrap();
+            assert_eq!(table.index(index), Some(&k));
+            assert_eq!(table.get(&k), Some(&k));
+            assert!(table.contains(&k));
+
+            // SAFETY: `index` came from `get_index`, and the table is not empty.
+            unsafe {
+                assert_eq!(table.index_unchecked(index), &k);
+                assert_eq!(table.get_unchecked(&k), &k);
+            }
+        }
+
+        for k in 0..8u32 {
+            let index = table.get_index(&k).unwrap();
+            assert_eq!(table.index_mut(index), Some(&mut { k }));
+            assert_eq!(table.get_mut(&k), Some(&mut { k }));
+            // SAFETY: `index` came from `get_index`, and the table is not empty.
+            unsafe {
+                assert_eq!(table.index_unchecked_mut(index), &mut { k });
+                assert_eq!(table.get_unchecked_mut(&k), &mut { k });
+            }
+        }
+    }
+
+    #[test]
+    fn map_accessors_split_entries_into_keys_and_values() {
+        let mut table = map_of((0..8).map(|k| (k, k * 10)));
+
+        for k in 0..8u32 {
+            let index = table.get_index(&k).unwrap();
+            assert_eq!(table.map_index(index), Some((&k, &(k * 10))));
+            assert_eq!(table.map_get_key_value(&k), Some((&k, &(k * 10))));
+            assert_eq!(table.map_get(&k), Some(&(k * 10)));
+
+            // SAFETY: `index` came from `get_index`, and the table is not empty.
+            unsafe {
+                assert_eq!(table.map_index_unchecked(index), (&k, &(k * 10)));
+                assert_eq!(table.map_get_key_value_unchecked(&k), (&k, &(k * 10)));
+                assert_eq!(table.map_get_unchecked(&k), &(k * 10));
+            }
+        }
+
+        // The mutable halves reach the value only; the key comes back shared.
+        let index = table.get_index(&3u32).unwrap();
+        *table.map_index_mut(index).unwrap().1 = 1;
+        *table.map_get_key_value_mut(&3u32).unwrap().1 += 1;
+        *table.map_get_mut(&3u32).unwrap() += 1;
+        // SAFETY: `index` came from `get_index`, and the table is not empty.
+        unsafe {
+            *table.map_index_unchecked_mut(index).1 += 1;
+            *table.map_get_key_value_unchecked_mut(&3u32).1 += 1;
+            *table.map_get_unchecked_mut(&3u32) += 1;
+        }
+        assert_eq!(table.map_get(&3u32), Some(&6));
+
+        assert_eq!(table.map_get_key_value(&99u32), None);
+        assert_eq!(table.map_get(&99u32), None);
+        assert_eq!(table.map_index(99), None);
+        assert_eq!(table.map_index_mut(99), None);
+        assert_eq!(table.map_get_key_value_mut(&99u32), None);
+        assert_eq!(table.map_get_mut(&99u32), None);
+    }
+
+    #[test]
+    fn disjoint_accessors_hand_out_independent_borrows() {
+        let mut table = map_of((0..8).map(|k| (k, k * 10)));
+
+        let [a, b, missing] = table.map_get_disjoint_mut([&1u32, &2u32, &99u32]);
+        *a.unwrap() = 111;
+        *b.unwrap() = 222;
+        assert!(missing.is_none());
+
+        let [a, missing] = table.map_get_disjoint_key_value_mut([&3u32, &99u32]);
+        let (key, value) = a.unwrap();
+        assert_eq!(key, &3);
+        *value = 333;
+        assert!(missing.is_none());
+
+        assert_eq!(table.map_get(&1u32), Some(&111));
+        assert_eq!(table.map_get(&2u32), Some(&222));
+        assert_eq!(table.map_get(&3u32), Some(&333));
+    }
+
+    #[test]
+    fn unchecked_disjoint_accessors_hand_out_independent_borrows() {
+        let mut table = map_of((0..8).map(|k| (k, k * 10)));
+
+        // SAFETY: the keys are pairwise distinct, so they cannot share an entry.
+        let [a, b, missing] =
+            unsafe { table.map_get_disjoint_unchecked_mut([&1u32, &2u32, &99u32]) };
+        *a.unwrap() = 111;
+        *b.unwrap() = 222;
+        assert!(missing.is_none());
+
+        // SAFETY: the keys are pairwise distinct, so they cannot share an entry.
+        let [a, missing] =
+            unsafe { table.map_get_disjoint_key_value_unchecked_mut([&3u32, &99u32]) };
+        *a.unwrap().1 = 333;
+        assert!(missing.is_none());
+
+        assert_eq!(table.map_get(&1u32), Some(&111));
+        assert_eq!(table.map_get(&2u32), Some(&222));
+        assert_eq!(table.map_get(&3u32), Some(&333));
+    }
+
+    #[test]
+    fn the_checked_disjoint_accessors_refuse_to_alias() {
+        let mut table = map_of((0..8).map(|k| (k, k * 10)));
+
+        let aliased = catch_unwind(AssertUnwindSafe(|| {
+            table.map_get_disjoint_mut([&1u32, &1u32]);
+        }));
+        assert!(
+            aliased.is_err(),
+            "two borrows of one entry must not be handed out"
+        );
+
+        let aliased = catch_unwind(AssertUnwindSafe(|| {
+            table.map_get_disjoint_key_value_mut([&2u32, &2u32]);
+        }));
+        assert!(
+            aliased.is_err(),
+            "two borrows of one entry must not be handed out"
+        );
+
+        // Absent keys are `None` rather than duplicates, however many there are.
+        let [x, y] = table.map_get_disjoint_mut([&98u32, &99u32]);
+        assert!(x.is_none() && y.is_none());
+    }
+
+    #[test]
+    fn unique_indices_ignores_absent_keys() {
+        assert!(unique_indices(&[]));
+        assert!(unique_indices(&[None, None]));
+        assert!(unique_indices(&[Some(0), Some(1), None]));
+        assert!(unique_indices(&[None, Some(2), None]));
+
+        assert!(!unique_indices(&[Some(1), Some(1)]));
+        assert!(!unique_indices(&[Some(0), None, Some(0)]));
+    }
+
+    #[test]
+    fn iteration_visits_every_entry() {
+        let mut table = map_of((0..5).map(|k| (k, k)));
+
+        assert_eq!(table.iter().count(), 5);
+        assert_eq!(table.as_slice().len(), 5);
+        assert_eq!(table.hasher().seed(), 1);
+
+        for (_, value) in table.iter_mut() {
+            *value += 100;
+        }
+        for k in 0..5u32 {
+            assert_eq!(table.map_get(&k), Some(&(k + 100)));
+        }
+
+        let mut owned = table.into_iter().collect::<Vec<_>>();
+        owned.sort_unstable();
+        assert_eq!(owned, (0..5).map(|k| (k, k + 100)).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn a_table_shows_the_parameters_that_address_its_entries() {
+        let shown = format!("{:?}", map_of([(1u32, 10u32)]));
+
+        for field in [
+            "global_param",
+            "params",
+            "indices",
+            "entries",
+            "hasher_builder",
+        ] {
+            assert!(shown.contains(field), "`{field}` missing from {shown}");
+        }
+        assert!(shown.contains("10"), "{shown}");
+    }
+
+    #[test]
+    fn a_cloned_table_is_independent() {
+        let table = map_of((0..5).map(|k| (k, k)));
+
+        let mut clone = table.clone();
+        *clone.map_get_mut(&1u32).unwrap() = 99;
+        assert_eq!(table.map_get(&1u32), Some(&1));
+        assert_eq!(clone.map_get(&1u32), Some(&99));
+
+        clone.clone_from(&table);
+        assert_eq!(clone.map_get(&1u32), Some(&1));
+    }
+
+    #[test]
+    fn equality_ignores_the_hasher_and_the_entry_order() {
+        // Different seeds permute the entries differently, so this compares by lookup rather
+        // than position.
+        let mut a: Builder<MapOps<u32, u32>, _, NonPortable> =
+            Builder::with_hasher(DefaultHasherSeed::with_seed(1));
+        let mut b: Builder<MapOps<u32, u32>, _, NonPortable> =
+            Builder::with_hasher(DefaultHasherSeed::with_seed(2));
+        for k in 0..16u32 {
+            a.map_insert(k, k);
+        }
+        for k in (0..16u32).rev() {
+            b.map_insert(k, k);
+        }
+        let (a, b) = (a.build(), b.build());
+
+        assert_eq!(a, b);
+        assert_eq!(a, a);
+        assert_ne!(a, map_of((0..15).map(|k| (k, k))));
+        assert_ne!(a, map_of((0..16).map(|k| (k, if k == 3 { 99 } else { k }))));
+    }
+}
+
+#[cfg(all(test, feature = "serde"))]
+mod serde_tests {
+    use super::*;
+    use crate::portability::{MapOps, OrderedMapOps, OrderedSetOps, Portable, SetOps};
+    use crate::table::Builder;
+
+    use alloc::string::{String, ToString};
+
+    type OrderedSetTable = Table<OrderedSetOps<u32>, DefaultHasherSeed, Portable>;
+    type UnorderedSetTable = Table<SetOps<u32>, DefaultHasherSeed, Portable>;
+
+    fn build<O>(
+        entries: impl IntoIterator<Item = O::Entry>,
+    ) -> Builder<O, DefaultHasherSeed, Portable>
+    where
+        O: TableOps,
+        O::Key: HashOps<DefaultHasherSeed, Portable> + EqOps<O::Key, Portable>,
+    {
+        let mut builder = Builder::with_hasher(DefaultHasherSeed::with_seed(7));
+        for entry in entries {
+            builder.insert(entry);
+        }
+        builder
+    }
+
+    /// The layout every case below starts from: three entries, an ordered table.
+    const ORDERED: &str = r#"{"hasher":{"seed":7},"entries":[0,1,2],
+        "global_param":0,"params":[0,1,0],"indices":[2,1,0]}"#;
+
+    fn ordered_with(field: &str, value: &str) -> String {
+        let original = serde_json::from_str::<serde_json::Value>(ORDERED).unwrap();
+        let mut object = original.as_object().unwrap().clone();
+        object.insert(field.into(), serde_json::from_str(value).unwrap());
+        serde_json::to_string(&object).unwrap()
+    }
+
+    #[test]
+    fn every_shape_survives_a_round_trip() {
+        let ordered_set = build::<OrderedSetOps<u32>>(0..4u32).build();
+        let set = build::<SetOps<u32>>(0..4u32).build();
+        let ordered_map = build::<OrderedMapOps<u32, u32>>((0..4u32).map(|k| (k, k * 10))).build();
+        let map = build::<MapOps<u32, u32>>((0..4u32).map(|k| (k, k * 10))).build();
+
+        macro_rules! round_trip {
+            ($table:expr, $ty:ty) => {{
+                let json = serde_json::to_string(&$table).unwrap();
+                let back: $ty = serde_json::from_str(&json).unwrap();
+                assert_eq!(back, $table);
+                back
+            }};
+        }
+
+        let back = round_trip!(ordered_set, OrderedSetTable);
+        assert_eq!(back.as_slice(), &[0, 1, 2, 3]);
+        assert_eq!(back.hasher().seed(), 7);
+
+        round_trip!(set, UnorderedSetTable);
+        let back = round_trip!(
+            ordered_map,
+            Table<OrderedMapOps<u32, u32>, DefaultHasherSeed, Portable>
+        );
+        for k in 0..4u32 {
+            assert_eq!(back.map_get(&k), Some(&(k * 10)));
+        }
+        round_trip!(map, Table<MapOps<u32, u32>, DefaultHasherSeed, Portable>);
+    }
+
+    #[test]
+    fn the_slot_table_is_written_only_when_the_shape_has_one() {
+        let ordered = serde_json::to_value(build::<OrderedSetOps<u32>>(0..3u32).build()).unwrap();
+        let unordered = serde_json::to_value(build::<SetOps<u32>>(0..3u32).build()).unwrap();
+
+        let fields = |v: &serde_json::Value| {
+            let mut names = v
+                .as_object()
+                .unwrap()
+                .keys()
+                .cloned()
+                .collect::<alloc::vec::Vec<_>>();
+            names.sort();
+            names
+        };
+
+        assert_eq!(
+            fields(&ordered),
+            ["entries", "global_param", "hasher", "indices", "params"],
+        );
+        assert_eq!(
+            fields(&unordered),
+            ["entries", "global_param", "hasher", "params"],
+        );
+    }
+
+    #[test]
+    fn a_slot_pointing_past_the_entries_is_refused() {
+        // Accepting this would let an unchecked lookup read out of bounds.
+        let tampered = ordered_with("indices", "[3,1,0]");
+        assert!(serde_json::from_str::<OrderedSetTable>(&tampered).is_err());
+
+        // The valid original is accepted, so the rejection is down to the slot alone.
+        assert!(serde_json::from_str::<OrderedSetTable>(ORDERED).is_ok());
+    }
+
+    #[test]
+    fn arrays_that_disagree_in_length_are_refused() {
+        for (field, value) in [
+            ("params", "[0,1]"),
+            ("indices", "[1,0]"),
+            ("entries", "[0,1]"),
+        ] {
+            let tampered = ordered_with(field, value);
+            assert!(
+                serde_json::from_str::<OrderedSetTable>(&tampered).is_err(),
+                "a short `{field}` must be refused",
+            );
+        }
+    }
+
+    #[test]
+    fn a_missing_field_is_refused() {
+        for field in ["hasher", "entries", "global_param", "params", "indices"] {
+            let mut object = serde_json::from_str::<serde_json::Value>(ORDERED)
+                .unwrap()
+                .as_object()
+                .unwrap()
+                .clone();
+            object.remove(field);
+            let json = serde_json::to_string(&object).unwrap();
+
+            let error = serde_json::from_str::<OrderedSetTable>(&json)
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains(field),
+                "dropping `{field}` should say so: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_repeated_field_is_refused() {
+        let json = r#"{"hasher":{"seed":7},"entries":[0,1,2],"entries":[0,1,2],
+            "global_param":0,"params":[0,1,0],"indices":[2,1,0]}"#;
+
+        let error = serde_json::from_str::<OrderedSetTable>(json)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("entries"), "{error}");
+    }
+
+    #[test]
+    fn a_shape_without_a_slot_table_refuses_one() {
+        // `indices` is a known field name, but not for this shape.
+        let json = r#"{"hasher":{"seed":7},"entries":[2,1,0],
+            "global_param":0,"params":[0,1,0],"indices":[2,1,0]}"#;
+
+        let error = serde_json::from_str::<UnorderedSetTable>(json)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("indices"), "{error}");
+        // The rejection has to name every field this shape does take, `global_param` included.
+        for expected in ["hasher", "entries", "global_param", "params"] {
+            assert!(
+                error.contains(expected),
+                "`{expected}` missing from: {error}"
+            );
+        }
+
+        // Without it the same bytes deserialize.
+        let json = r#"{"hasher":{"seed":7},"entries":[2,1,0],"global_param":0,"params":[0,1,0]}"#;
+        assert!(serde_json::from_str::<UnorderedSetTable>(json).is_ok());
+    }
+
+    #[test]
+    fn an_unrecognized_field_is_refused() {
+        let json = ordered_with("bogus", "1");
+        assert!(serde_json::from_str::<OrderedSetTable>(&json).is_err());
     }
 }

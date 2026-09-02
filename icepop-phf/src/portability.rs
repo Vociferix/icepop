@@ -560,3 +560,162 @@ where
         self.portable_eq(other)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::table::Builder;
+
+    use alloc::vec::Vec;
+    use portable::DefaultHasherSeed;
+
+    #[test]
+    fn each_shape_reports_whether_it_needs_a_slot_table() {
+        // The ordered shapes pay for a slot table; the others fold the slot into the index.
+        assert_eq!(
+            [
+                <OrderedMapOps<u32, u32> as TableOps>::HAVE_INDICES,
+                <OrderedSetOps<u32> as TableOps>::HAVE_INDICES,
+                <MapOps<u32, u32> as TableOps>::HAVE_INDICES,
+                <SetOps<u32> as TableOps>::HAVE_INDICES,
+            ],
+            [true, true, false, false],
+        );
+    }
+
+    #[test]
+    fn a_map_entry_is_a_pair_and_a_set_entry_is_the_element() {
+        assert_eq!(<MapOps<u32, u8> as TableOps>::get_key(&(7, 1)), &7);
+        assert_eq!(<OrderedMapOps<u32, u8> as TableOps>::get_key(&(7, 1)), &7);
+        assert_eq!(<SetOps<u32> as TableOps>::get_key(&7), &7);
+        assert_eq!(<OrderedSetOps<u32> as TableOps>::get_key(&7), &7);
+    }
+
+    #[test]
+    fn resolving_a_slot_indirects_only_for_the_ordered_shapes() {
+        let indices: Box<[u32]> = Box::from([3u32, 1, 2, 0]);
+
+        // SAFETY: the array holds four entries, so slots 0 and 3 are in bounds.
+        unsafe {
+            assert_eq!(<OrderedSetOps<u32> as TableOps>::get_index(&indices, 0), 3);
+            assert_eq!(
+                <OrderedMapOps<u32, u8> as TableOps>::get_index(&indices, 3),
+                0
+            );
+
+            // The unordered shapes ignore the array and return the slot itself.
+            assert_eq!(<SetOps<u32> as TableOps>::get_index(&(), 2), 2);
+            assert_eq!(<MapOps<u32, u8> as TableOps>::get_index(&(), 2), 2);
+        }
+    }
+
+    #[cfg(feature = "serde")]
+    #[test]
+    fn verify_accepts_a_well_formed_table() {
+        let mut ordered: Builder<OrderedSetOps<u32>, _, Portable> =
+            Builder::with_hasher(DefaultHasherSeed::with_seed(1));
+        let mut unordered: Builder<SetOps<u32>, _, Portable> =
+            Builder::with_hasher(DefaultHasherSeed::with_seed(1));
+        for k in 0..8u32 {
+            ordered.insert(k);
+            unordered.insert(k);
+        }
+
+        assert!(OrderedSetOps::<u32>::verify(&ordered.build()));
+        assert!(SetOps::<u32>::verify(&unordered.build()));
+    }
+
+    #[cfg(feature = "serde")]
+    #[test]
+    fn verify_rejects_the_layouts_the_unchecked_accessors_would_trust() {
+        use crate::table::Table;
+        use core::marker::PhantomData;
+
+        fn ordered(
+            params: &[u32],
+            indices: &[u32],
+            entries: &[u32],
+        ) -> Table<OrderedSetOps<u32>, DefaultHasherSeed, Portable> {
+            Table {
+                global_param: 0,
+                params: Box::from(params),
+                indices: Box::from(indices),
+                entries: Box::from(entries),
+                hasher_builder: DefaultHasherSeed::with_seed(1),
+                _portable: PhantomData,
+            }
+        }
+
+        let good = ordered(&[0, 0, 0], &[2, 0, 1], &[10, 11, 12]);
+        assert!(OrderedSetOps::<u32>::verify(&good));
+
+        // A slot pointing past the entries is what would make an unchecked lookup read out of
+        // bounds, so it has to be caught here.
+        let out_of_range = ordered(&[0, 0, 0], &[3, 0, 1], &[10, 11, 12]);
+        assert!(!OrderedSetOps::<u32>::verify(&out_of_range));
+
+        // Arrays that disagree in length would let a slot index the wrong one.
+        assert!(!OrderedSetOps::<u32>::verify(&ordered(
+            &[0, 0],
+            &[2, 0, 1],
+            &[10, 11, 12]
+        )));
+        assert!(!OrderedSetOps::<u32>::verify(&ordered(
+            &[0, 0, 0],
+            &[1, 0],
+            &[10, 11, 12]
+        )));
+        assert!(!OrderedSetOps::<u32>::verify(&ordered(
+            &[0, 0, 0],
+            &[2, 0, 1],
+            &[10, 11]
+        )));
+
+        // An unordered table has no slot table to check, only the two lengths.
+        let unordered = |params: &[u32], entries: &[u32]| Table::<SetOps<u32>, _, Portable> {
+            global_param: 0,
+            params: Box::from(params),
+            indices: (),
+            entries: Box::from(entries),
+            hasher_builder: DefaultHasherSeed::with_seed(1),
+            _portable: PhantomData,
+        };
+        assert!(SetOps::<u32>::verify(&unordered(&[0, 0], &[10, 11])));
+        assert!(!SetOps::<u32>::verify(&unordered(&[0], &[10, 11])));
+    }
+
+    #[test]
+    fn the_portable_interface_compares_a_key_against_other_widths() {
+        // `Portable` dispatches to `PortableEq`/`PortableHash`, which treat `usize` as the width
+        // a serializer would store it at. The standard interface has no such notion, so this is
+        // the observable difference between the two markers.
+        let mut builder: Builder<MapOps<usize, u32>, _, Portable> =
+            Builder::with_hasher(DefaultHasherSeed::with_seed(1));
+        for k in 0..8usize {
+            builder.map_insert(k, k as u32);
+        }
+        let table = builder.build();
+
+        for k in 0..8u64 {
+            assert_eq!(table.map_get(&k), Some(&(k as u32)));
+        }
+        assert_eq!(table.map_get(&99u64), None);
+    }
+
+    #[test]
+    fn the_standard_interface_hashes_and_compares_with_the_std_traits() {
+        // The same table under `NonPortable`, reached through `Hash`/`Equivalent`.
+        let mut builder: Builder<MapOps<Vec<u8>, u32>, _, NonPortable> =
+            Builder::with_hasher(DefaultHasherSeed::with_seed(1));
+        for k in 0..8u8 {
+            builder.map_insert(alloc::vec![k], k as u32);
+        }
+        let table = builder.build();
+
+        // `Equivalent` admits a borrowed lookup key, so a slice finds an owned `Vec`.
+        for k in 0..8u8 {
+            assert_eq!(table.map_get([k].as_slice()), Some(&(k as u32)));
+        }
+        assert_eq!(table.map_get([99u8].as_slice()), None);
+    }
+}

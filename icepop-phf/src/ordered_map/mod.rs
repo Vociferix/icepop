@@ -761,3 +761,165 @@ impl<K, V, S, P> IntoIterator for Builder<K, V, S, P> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use alloc::format;
+    use alloc::vec::Vec;
+
+    /// Deliberately not sorted, so anything that reorders shows up.
+    const ORDER: [(u32, u32); 5] = [(9, 90), (3, 30), (7, 70), (1, 10), (8, 80)];
+
+    fn map() -> OrderedMap<u32, u32> {
+        let mut builder =
+            OrderedMap::<u32, u32>::builder_with_hasher(DefaultHasherSeed::with_seed(1));
+        for (k, v) in ORDER {
+            builder.insert(k, v);
+        }
+        builder.build()
+    }
+
+    #[test]
+    fn insertion_order_survives_the_build() {
+        let map = map();
+
+        assert_eq!(map.as_slice(), &ORDER);
+        assert_eq!(map.iter().map(|(k, v)| (*k, *v)).collect::<Vec<_>>(), ORDER);
+        assert_eq!(map.keys().copied().collect::<Vec<_>>(), [9, 3, 7, 1, 8]);
+        assert_eq!(
+            map.values().copied().collect::<Vec<_>>(),
+            [90, 30, 70, 10, 80]
+        );
+        assert_eq!(
+            (&map).into_iter().map(|(k, _)| *k).collect::<Vec<_>>(),
+            [9, 3, 7, 1, 8]
+        );
+
+        for (position, &(k, v)) in ORDER.iter().enumerate() {
+            assert_eq!(map.index(position), Some((&k, &v)));
+            assert_eq!(map.get_index(&k), Some(position));
+            // SAFETY: `position` is below the length.
+            assert_eq!(unsafe { map.index_unchecked(position) }, (&k, &v));
+        }
+        assert_eq!(map.index(ORDER.len()), None);
+    }
+
+    #[test]
+    fn a_built_map_reports_its_contents() {
+        let map = map();
+
+        assert_eq!(map.len(), 5);
+        assert!(!map.is_empty());
+        assert_eq!(map.hasher().seed(), 1);
+        assert!(OrderedMap::<u32, u32>::builder().build().is_empty());
+
+        let shown = format!("{map:?}");
+        assert!(shown.starts_with('{') && shown.ends_with('}'), "{shown}");
+        assert!(shown.contains("90"), "{shown}");
+
+        let mut clone = map.clone();
+        clone.clone_from(&map);
+        assert_eq!(clone.as_slice(), &ORDER);
+    }
+
+    #[test]
+    fn values_are_mutable_in_place_and_keys_are_not() {
+        let mut map = map();
+
+        *map.index_mut(0).unwrap().1 = 1;
+        assert_eq!(map.index_mut(ORDER.len()), None);
+        // SAFETY: the map holds five entries, so index 0 is in bounds.
+        *unsafe { map.index_unchecked_mut(0) }.1 += 1;
+        assert_eq!(map.get(&9u32), Some(&2));
+
+        for (_, value) in map.iter_mut() {
+            *value += 100;
+        }
+        for value in map.values_mut() {
+            *value += 1000;
+        }
+        assert_eq!(map.get(&9u32), Some(&1102));
+        assert_eq!(
+            (&mut map).into_iter().map(|(k, _)| *k).collect::<Vec<_>>(),
+            [9, 3, 7, 1, 8],
+        );
+
+        // Order is untouched by any of that.
+        assert_eq!(map.keys().copied().collect::<Vec<_>>(), [9, 3, 7, 1, 8]);
+    }
+
+    #[test]
+    fn a_map_can_be_taken_apart_into_keys_values_or_entries() {
+        let map = map();
+
+        assert_eq!(map.clone().into_keys().collect::<Vec<_>>(), [9, 3, 7, 1, 8]);
+        assert_eq!(
+            map.clone().into_values().collect::<Vec<_>>(),
+            [90, 30, 70, 10, 80]
+        );
+        assert_eq!(map.into_iter().collect::<Vec<_>>(), ORDER);
+    }
+
+    #[test]
+    fn a_builder_keeps_order_and_reports_its_capacity() {
+        let mut builder = OrderedMap::<u32, u32>::builder_with_capacity_and_hasher(
+            50,
+            DefaultHasherSeed::with_seed(2),
+        );
+        assert!(builder.is_empty());
+        assert!(builder.capacity() >= 50);
+        assert_eq!(builder.hasher().seed(), 2);
+
+        for (k, v) in ORDER {
+            builder.insert(k, v);
+        }
+        assert_eq!(builder.len(), 5);
+        assert_eq!(
+            builder.iter().map(|(k, v)| (*k, *v)).collect::<Vec<_>>(),
+            ORDER
+        );
+        assert_eq!(builder.keys().copied().collect::<Vec<_>>(), [9, 3, 7, 1, 8]);
+        assert_eq!(
+            builder.values().copied().collect::<Vec<_>>(),
+            [90, 30, 70, 10, 80]
+        );
+        assert_eq!((&builder).into_iter().count(), 5);
+
+        for (_, value) in builder.iter_mut() {
+            *value += 1;
+        }
+        for value in builder.values_mut() {
+            *value += 1;
+        }
+        assert_eq!(builder.get(&9u32), Some(&92));
+        assert_eq!((&mut builder).into_iter().count(), 5);
+
+        builder.shrink_to(8);
+        assert!(builder.capacity() < 50);
+        builder.reserve(100);
+        assert!(builder.capacity() >= 100);
+        builder.shrink_to_fit();
+        assert!(builder.capacity() < 100);
+
+        let mut clone = builder.clone();
+        clone.clone_from(&builder);
+        assert!(format!("{clone:?}").contains("92"));
+        assert_eq!(
+            clone.clone().into_keys().collect::<Vec<_>>(),
+            [9, 3, 7, 1, 8]
+        );
+        assert_eq!(
+            clone.clone().into_values().collect::<Vec<_>>(),
+            [92, 32, 72, 12, 82]
+        );
+        assert_eq!(
+            clone.into_iter().map(|(k, _)| k).collect::<Vec<_>>(),
+            [9, 3, 7, 1, 8]
+        );
+
+        builder.clear();
+        assert!(builder.is_empty());
+    }
+}

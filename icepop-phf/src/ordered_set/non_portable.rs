@@ -584,3 +584,106 @@ where
 }
 
 impl<T, S> Eq for Builder<T, S, NonPortable> where T: Eq {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::OrderedSet;
+
+    use alloc::vec::Vec;
+
+    #[test]
+    fn every_constructor_reaches_the_same_builder() {
+        assert!(OrderedSet::<u32>::builder().build().is_empty());
+        assert!(OrderedSet::<u32>::builder_with_capacity(8).capacity() >= 8);
+        assert_eq!(
+            OrderedSet::<u32>::builder_with_hasher(DefaultHasherSeed::with_seed(3))
+                .hasher()
+                .seed(),
+            3,
+        );
+        assert!(
+            OrderedSet::<u32>::builder_with_capacity_and_hasher(8, DefaultHasherSeed::with_seed(3))
+                .capacity()
+                >= 8
+        );
+
+        assert!(Builder::<u32>::new().build().is_empty());
+        assert!(Builder::<u32>::with_capacity(8).capacity() >= 8);
+        assert_eq!(
+            Builder::<u32>::with_hasher(DefaultHasherSeed::with_seed(3))
+                .hasher()
+                .seed(),
+            3,
+        );
+        assert!(
+            Builder::<u32>::with_capacity_and_hasher(8, DefaultHasherSeed::with_seed(3)).capacity()
+                >= 8
+        );
+
+        assert!(OrderedSet::<u32>::default().is_empty());
+        assert!(Builder::<u32>::default().build().is_empty());
+    }
+
+    #[test]
+    fn lookups_accept_a_borrowed_key() {
+        let set: OrderedSet<alloc::string::String> =
+            ["ash".into(), "elm".into()].into_iter().collect();
+
+        assert_eq!(set.get_index("ash"), Some(0));
+        assert!(set.contains("elm"));
+        assert_eq!(set.get("ash").map(|s| s.as_str()), Some("ash"));
+        // SAFETY: the set is not empty.
+        unsafe {
+            assert_eq!(set.get_index_unchecked("elm"), 1);
+            assert_eq!(set.get_unchecked("elm").as_str(), "elm");
+        }
+
+        assert_eq!(set.get_index("oak"), None);
+        assert!(!set.contains("oak"));
+        assert_eq!(set.get("oak"), None);
+    }
+
+    #[test]
+    fn the_builder_inserts_replaces_and_removes_in_place() {
+        let mut builder = OrderedSet::<u32>::builder();
+        for k in [5u32, 1, 9] {
+            builder.insert(k);
+        }
+
+        assert!(!builder.insert(5));
+        assert_eq!(builder.replace(5), Some(5));
+        assert_eq!(builder.get_or_insert(1), &1);
+        assert_eq!(builder.get_or_insert_with(&2u32, || 2), &2);
+        assert!(builder.contains(&9u32));
+        assert_eq!(builder.get(&9u32), Some(&9));
+        assert_eq!(builder.get(&99u32), None);
+        assert!(!builder.contains(&99u32));
+
+        assert_eq!(builder.take(&1u32), Some(1));
+        assert!(builder.remove(&9u32));
+        assert!(!builder.remove(&9u32));
+        assert_eq!(builder.iter().copied().collect::<Vec<_>>(), [5, 2]);
+    }
+
+    #[test]
+    fn equality_compares_the_element_order() {
+        let a: OrderedSet<u32> = [1u32, 2, 3].into_iter().collect();
+        let reordered: OrderedSet<u32> = [3u32, 2, 1].into_iter().collect();
+
+        assert_eq!(a, [1u32, 2, 3].into_iter().collect::<OrderedSet<u32>>());
+        assert_ne!(a, reordered);
+
+        let mut ba: Builder<u32> = [1u32, 2].into_iter().collect();
+        let bb: Builder<u32> = [1u32, 2].into_iter().collect();
+        assert_eq!(ba, bb);
+        ba.extend([3u32]);
+        assert_ne!(ba, bb);
+    }
+
+    #[test]
+    fn collecting_keeps_the_first_of_two_equal_elements() {
+        let set: OrderedSet<u32> = [1u32, 2, 1].into_iter().collect();
+        assert_eq!(set.as_slice(), &[1, 2]);
+    }
+}

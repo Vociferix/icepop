@@ -116,6 +116,9 @@ pub use portable;
 
 extern crate alloc;
 
+#[cfg(test)]
+extern crate std;
+
 pub use portability::{NonPortable, Portable};
 
 #[doc(inline)]

@@ -899,3 +899,426 @@ where
         self.entries.into_iter()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::portability::{MapOps, OrderedMapOps, OrderedSetOps, SetOps};
+
+    use alloc::vec::Vec;
+    use core::hash::{BuildHasher, Hasher};
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+
+    /// Sizes chosen to cover the empty and single-entry edges, a size that forces several
+    /// non-trivial buckets, and one large enough that the displacement search does real work.
+    const SIZES: [usize; 7] = [0, 1, 2, 3, 17, 64, 257];
+
+    fn seeded<O: TableOps>(seed: u64) -> Builder<O, DefaultHasherSeed, NonPortable> {
+        Builder::with_hasher(DefaultHasherSeed::with_seed(seed))
+    }
+
+    /// A hasher that maps every key to the same hash, so no parameter can separate two keys.
+    #[derive(Clone, Debug, Default)]
+    struct ConstHasher;
+
+    struct ConstState;
+
+    impl BuildHasher for ConstHasher {
+        type Hasher = ConstState;
+
+        fn build_hasher(&self) -> ConstState {
+            ConstState
+        }
+    }
+
+    impl Hasher for ConstState {
+        fn finish(&self) -> u64 {
+            0
+        }
+
+        fn write(&mut self, _: &[u8]) {}
+    }
+
+    #[test]
+    fn every_key_is_found_in_its_own_entry_after_build() {
+        for seed in 0..8u64 {
+            for len in SIZES {
+                let mut builder = seeded::<SetOps<u32>>(seed);
+                for i in 0..len as u32 {
+                    builder.insert(i);
+                }
+
+                let table = builder.build();
+                assert_eq!(table.len(), len, "seed {seed}, len {len}");
+
+                for i in 0..len as u32 {
+                    let idx = table
+                        .get_index(&i)
+                        .unwrap_or_else(|| panic!("{i} missing at seed {seed}, len {len}"));
+                    assert_eq!(table.as_slice()[idx], i);
+                }
+                assert_eq!(table.get_index(&u32::MAX), None);
+            }
+        }
+    }
+
+    #[test]
+    fn build_covers_every_collection_shape() {
+        let keys = 0..40u32;
+
+        let mut set = seeded::<SetOps<u32>>(7);
+        let mut ordered_set = seeded::<OrderedSetOps<u32>>(7);
+        let mut map = seeded::<MapOps<u32, u32>>(7);
+        let mut ordered_map = seeded::<OrderedMapOps<u32, u32>>(7);
+        for i in keys.clone() {
+            set.insert(i);
+            ordered_set.insert(i);
+            map.map_insert(i, i * 10);
+            ordered_map.map_insert(i, i * 10);
+        }
+
+        let (set, ordered_set) = (set.build(), ordered_set.build());
+        let (map, ordered_map) = (map.build(), ordered_map.build());
+
+        for i in keys {
+            assert!(set.contains(&i));
+            assert!(ordered_set.contains(&i));
+            assert_eq!(map.map_get(&i), Some(&(i * 10)));
+            assert_eq!(ordered_map.map_get(&i), Some(&(i * 10)));
+        }
+    }
+
+    #[test]
+    fn ordered_build_keeps_insertion_order_and_unordered_permutes_it() {
+        let order = [9u32, 3, 7, 1, 8, 2, 5];
+
+        let mut ordered = seeded::<OrderedSetOps<u32>>(3);
+        let mut unordered = seeded::<SetOps<u32>>(3);
+        for &k in &order {
+            ordered.insert(k);
+            unordered.insert(k);
+        }
+        let (ordered, unordered) = (ordered.build(), unordered.build());
+
+        assert_eq!(ordered.as_slice(), &order);
+
+        // The unordered table holds the same entries, and an entry's slot *is* its index, which
+        // is what lets it drop the slot table.
+        let mut permuted = unordered.as_slice().to_vec();
+        permuted.sort_unstable();
+        let mut sorted = order.to_vec();
+        sorted.sort_unstable();
+        assert_eq!(permuted, sorted);
+
+        for &k in &order {
+            let idx = unordered.get_index(&k).unwrap();
+            assert_eq!(unordered.as_slice()[idx], k);
+        }
+    }
+
+    #[test]
+    fn dropping_the_slot_table_selects_the_same_entries() {
+        // The unordered table is the ordered one with `indices` applied to `entries`, so a slot
+        // must resolve to the same key in both.
+        let mut ordered = seeded::<OrderedSetOps<u32>>(11);
+        let mut unordered = seeded::<SetOps<u32>>(11);
+        for i in 0..50u32 {
+            ordered.insert(i);
+            unordered.insert(i);
+        }
+        let (ordered, unordered) = (ordered.build(), unordered.build());
+
+        assert_eq!(ordered.indices.len(), ordered.len());
+        for (slot, &entry) in ordered.indices.iter().enumerate() {
+            assert_eq!(
+                unordered.as_slice()[slot],
+                ordered.as_slice()[entry as usize]
+            );
+        }
+    }
+
+    #[test]
+    fn build_panics_when_the_hasher_cannot_separate_two_keys() {
+        let mut builder: Builder<SetOps<u32>, ConstHasher, NonPortable> =
+            Builder::with_hasher(ConstHasher);
+        builder.insert(1);
+        builder.insert(2);
+
+        let err = catch_unwind(AssertUnwindSafe(|| builder.build())).unwrap_err();
+        let message = err
+            .downcast_ref::<&str>()
+            .copied()
+            .expect("panic carries a message");
+        assert!(message.contains("64-bit hash collisions"), "{message}");
+    }
+
+    #[test]
+    fn a_single_key_needs_no_separation() {
+        // One key can never collide with another, so even a degenerate hasher builds.
+        let mut builder: Builder<SetOps<u32>, ConstHasher, NonPortable> =
+            Builder::with_hasher(ConstHasher);
+        builder.insert(1);
+
+        assert!(builder.build().contains(&1u32));
+    }
+
+    #[test]
+    fn ordered_take_closes_the_gap_and_keeps_the_rest_findable() {
+        let mut builder = seeded::<OrderedSetOps<u32>>(5);
+        for i in 0..10u32 {
+            builder.insert(i);
+        }
+
+        assert_eq!(builder.take(&0u32), Some(0));
+        assert_eq!(builder.take(&5u32), Some(5));
+        assert_eq!(builder.take(&9u32), Some(9));
+        assert_eq!(builder.take(&5u32), None);
+
+        assert_eq!(builder.as_slice(), &[1, 2, 3, 4, 6, 7, 8]);
+        // Every surviving entry's index was shifted down, so this is what catches a bad fixup.
+        for k in [1u32, 2, 3, 4, 6, 7, 8] {
+            assert_eq!(builder.get(&k), Some(&k));
+        }
+    }
+
+    #[test]
+    fn unordered_take_swaps_the_last_entry_in_and_keeps_the_rest_findable() {
+        let mut builder = seeded::<SetOps<u32>>(5);
+        for i in 0..10u32 {
+            builder.insert(i);
+        }
+
+        // Removing from the middle moves the final entry into the hole, so its stored index has
+        // to be repointed.
+        assert!(builder.remove(&0u32));
+        assert!(builder.remove(&4u32));
+        assert!(!builder.remove(&4u32));
+
+        assert_eq!(builder.len(), 8);
+        for k in [1u32, 2, 3, 5, 6, 7, 8, 9] {
+            assert_eq!(builder.get(&k), Some(&k), "{k} lost after removals");
+        }
+        assert_eq!(builder.get(&0u32), None);
+
+        // Removing the last entry takes the early-out path instead.
+        let last = *builder.as_slice().last().unwrap();
+        assert_eq!(builder.take(&last), Some(last));
+        assert_eq!(builder.get(&last), None);
+    }
+
+    #[test]
+    fn insert_keeps_the_first_of_two_equal_keys_and_replace_keeps_the_last() {
+        let mut builder = seeded::<MapOps<u32, u32>>(2);
+
+        assert!(builder.insert((1, 10)));
+        assert!(!builder.insert((1, 99)));
+        assert_eq!(builder.map_get(&1u32), Some(&10));
+
+        assert_eq!(builder.replace((1, 99)), Some((1, 10)));
+        assert_eq!(builder.map_get(&1u32), Some(&99));
+        assert_eq!(builder.len(), 1);
+    }
+
+    #[test]
+    fn get_or_insert_returns_the_existing_entry_without_calling_the_default() {
+        let mut builder = seeded::<SetOps<u32>>(2);
+
+        assert_eq!(builder.get_or_insert_with(&1u32, || 1), &1);
+        assert_eq!(builder.get_or_insert_with(&1u32, || unreachable!()), &1);
+        assert_eq!(builder.get_or_insert(1), &1);
+        assert_eq!(builder.len(), 1);
+    }
+
+    #[test]
+    #[should_panic(expected = "default value does not match key")]
+    fn get_or_insert_with_rejects_a_default_that_is_not_the_key() {
+        let mut builder = seeded::<SetOps<u32>>(2);
+        builder.get_or_insert_with(&5u32, || 6);
+    }
+
+    #[test]
+    fn upsert_reports_whether_the_key_was_new_and_keeps_its_position() {
+        let mut builder = seeded::<OrderedMapOps<u32, u32>>(4);
+        for i in 0..5u32 {
+            builder.map_insert(i, i);
+        }
+
+        assert!(!builder.map_upsert(2, |old| old.unwrap() + 100));
+        assert!(builder.map_upsert(9, |old| {
+            assert_eq!(old, None);
+            9
+        }));
+
+        assert_eq!(
+            builder
+                .as_slice()
+                .iter()
+                .map(|&(k, _)| k)
+                .collect::<Vec<_>>(),
+            [0, 1, 2, 3, 4, 9],
+        );
+        assert_eq!(builder.map_get(&2u32), Some(&102));
+        for k in [0u32, 1, 3, 4, 9] {
+            assert_eq!(builder.map_get(&k), Some(&k));
+        }
+    }
+
+    #[test]
+    fn ordered_upsert_restores_order_when_the_update_panics() {
+        let mut builder = seeded::<OrderedMapOps<u32, u32>>(1);
+        for i in 0..6u32 {
+            builder.map_insert(i, i * 10);
+        }
+
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            builder.map_upsert(2, |_| panic!("boom"));
+        }));
+        assert!(result.is_err());
+
+        // The entry being updated is dropped, but the rest keep their order and stay findable.
+        assert_eq!(builder.len(), 5);
+        assert_eq!(
+            builder
+                .as_slice()
+                .iter()
+                .map(|&(k, _)| k)
+                .collect::<Vec<_>>(),
+            [0, 1, 3, 4, 5],
+        );
+        for k in [0u32, 1, 3, 4, 5] {
+            assert_eq!(builder.map_get(&k), Some(&(k * 10)));
+        }
+        assert_eq!(builder.map_get(&2u32), None);
+    }
+
+    #[test]
+    fn unordered_upsert_repairs_the_moved_entry_when_the_update_panics() {
+        let mut builder = seeded::<MapOps<u32, u32>>(1);
+        for i in 0..6u32 {
+            builder.map_insert(i, i * 10);
+        }
+
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            builder.map_upsert(2, |_| panic!("boom"));
+        }));
+        assert!(result.is_err());
+
+        // The final entry was swapped into the hole, so this is what catches a missed fixup.
+        assert_eq!(builder.len(), 5);
+        for k in [0u32, 1, 3, 4, 5] {
+            assert_eq!(builder.map_get(&k), Some(&(k * 10)), "{k} lost after panic");
+        }
+        assert_eq!(builder.map_get(&2u32), None);
+    }
+
+    #[test]
+    fn upsert_on_the_last_entry_takes_the_no_move_path() {
+        let mut builder = seeded::<OrderedMapOps<u32, u32>>(6);
+        for i in 0..3u32 {
+            builder.map_insert(i, i);
+        }
+
+        assert!(!builder.map_upsert(2, |old| old.unwrap() + 1));
+
+        assert_eq!(builder.as_slice(), &[(0, 0), (1, 1), (2, 3)]);
+        assert_eq!(builder.map_get(&2u32), Some(&3));
+    }
+
+    #[test]
+    fn iter_mut_reaches_the_values_of_every_entry() {
+        let mut builder = seeded::<MapOps<u32, u32>>(13);
+        for i in 0..4u32 {
+            builder.map_insert(i, i);
+        }
+
+        // Only the value half may be written: a key changed here would be stranded behind the
+        // hash the builder already recorded for it.
+        for (_, value) in builder.iter_mut() {
+            *value += 100;
+        }
+
+        for i in 0..4u32 {
+            assert_eq!(builder.map_get(&i), Some(&(i + 100)));
+        }
+    }
+
+    #[test]
+    fn map_accessors_reach_keys_and_values_separately() {
+        let mut builder = seeded::<MapOps<u32, u32>>(8);
+        builder.map_insert(1, 10);
+
+        assert_eq!(builder.map_get_key_value(&1u32), Some((&1, &10)));
+        assert_eq!(builder.map_get(&1u32), Some(&10));
+        assert_eq!(builder.map_get(&2u32), None);
+
+        *builder.map_get_mut(&1u32).unwrap() = 11;
+        *builder.map_get_key_value_mut(&1u32).unwrap().1 = 12;
+        assert_eq!(builder.map_get(&1u32), Some(&12));
+        assert!(builder.map_get_key_value_mut(&2u32).is_none());
+
+        assert_eq!(*builder.map_get_or_insert_with(&2u32, || 20), 20);
+        assert_eq!(*builder.map_get_or_insert(&3u32, 30), 30);
+        assert_eq!(*builder.map_get_or_insert_default(&4u32), 0);
+        assert_eq!(*builder.map_get_or_insert(&3u32, 99), 30);
+
+        assert_eq!(builder.map_remove(&3u32), Some(30));
+        assert_eq!(builder.map_remove(&3u32), None);
+    }
+
+    #[test]
+    fn entry_accessors_reach_whole_entries() {
+        let mut builder = seeded::<SetOps<u32>>(9);
+        builder.insert(1);
+
+        assert!(builder.contains(&1u32));
+        assert!(!builder.contains(&2u32));
+        assert_eq!(builder.get(&1u32), Some(&1));
+        assert_eq!(builder.get_mut(&1u32), Some(&mut 1));
+        assert_eq!(builder.get(&2u32), None);
+        assert_eq!(builder.get_mut(&2u32), None);
+    }
+
+    #[test]
+    fn capacity_is_reserved_released_and_cleared() {
+        let mut builder: Builder<SetOps<u32>, DefaultHasherSeed, NonPortable> =
+            Builder::with_capacity_and_hasher(100, DefaultHasherSeed::with_seed(0));
+        assert!(builder.capacity() >= 100);
+        assert!(builder.is_empty());
+        assert_eq!(builder.hasher().seed(), 0);
+
+        builder.insert(1);
+        assert_eq!(builder.len(), 1);
+        assert!(!builder.is_empty());
+
+        builder.shrink_to(10);
+        assert!(builder.capacity() < 100);
+        builder.reserve(200);
+        assert!(builder.capacity() >= 200);
+        builder.shrink_to_fit();
+        assert!(builder.capacity() < 200);
+
+        builder.clear();
+        assert!(builder.is_empty());
+        assert_eq!(builder.get(&1u32), None);
+    }
+
+    #[test]
+    fn a_cloned_builder_is_independent() {
+        let mut builder = seeded::<SetOps<u32>>(12);
+        builder.insert(1);
+
+        let mut clone = builder.clone();
+        clone.insert(2);
+        assert_eq!(builder.len(), 1);
+        assert_eq!(clone.len(), 2);
+
+        builder.clone_from(&clone);
+        assert!(builder.contains(&2u32));
+
+        assert_eq!(builder.iter().count(), 2);
+
+        let mut owned = builder.into_iter().collect::<Vec<_>>();
+        owned.sort_unstable();
+        assert_eq!(owned, [1, 2]);
+    }
+}
