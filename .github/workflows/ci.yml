@@ -1,0 +1,169 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Check formatting
+        run: cargo fmt --all --check
+      # `-D warnings` denies rustc's lints as well as Clippy's, so this covers both. It is
+      # deliberately scoped to this stable job rather than set globally: a new nightly lint
+      # would otherwise break the docs and Miri jobs.
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+
+  test:
+    name: Test (${{ matrix.name }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: default features
+            flags: ""
+          - name: no default features
+            flags: "--no-default-features"
+          - name: all features
+            flags: "--all-features"
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.name }}
+      - name: Build
+        run: cargo build --workspace --all-targets --locked ${{ matrix.flags }}
+      - name: Test
+        run: cargo test --workspace --locked ${{ matrix.flags }}
+
+  features:
+    name: Features (${{ matrix.name }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: "portable core, clippy", mode: core, command: "clippy --all-targets -- -D warnings" }
+          - { name: "portable core, test",   mode: core, command: "test" }
+          - { name: "portable each, clippy", mode: each, command: "clippy --all-targets -- -D warnings" }
+          - { name: "portable each, test",   mode: each, command: "test" }
+          - { name: "workspace, clippy",     mode: rest, command: "clippy --all-targets -- -D warnings" }
+          - { name: "workspace, test",       mode: rest, command: "test" }
+    env:
+      # `portable` declares 24 features, so a full powerset would be 2^24 combinations. These
+      # sixteen each do nothing but add impls for one third-party crate's own types, so they
+      # cannot interact with one another and are swept individually rather than combined.
+      # Everything else -- alloc, default-hasher, getrandom, derive, serde, rkyv-0_8 -- does
+      # more than that, and gets a full 2^6 powerset.
+      ISOLATED: >-
+        rend-0_5,allocator-api2-0_4,allocator-api2-0_3,allocator-api2-0_2,arrayvec-0_7,
+        ascii-1,bstr-1,bumpalo-3,bytes-1,either-1,smallvec-1,smol_str-0_2,smol_str-0_3,
+        thin-vec-0_2,tinyvec-1,triomphe-0_1
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.name }}
+      - uses: taiki-e/install-action@cargo-hack
+      # `--keep-going` reports every broken combination in one run, rather than stopping at
+      # the first and hiding the rest behind a fix-and-retry loop.
+      - name: Sweep feature combinations
+        run: |
+          set -euo pipefail
+          isolated="$(echo "$ISOLATED" | tr -d '[:space:]')"
+          case "${{ matrix.mode }}" in
+            core) args="--package portable --feature-powerset --exclude-features default,__all,$isolated" ;;
+            each) args="--package portable --each-feature --exclude-features __all" ;;
+            rest) args="--workspace --exclude portable --feature-powerset" ;;
+          esac
+          cargo hack $args --keep-going --locked ${{ matrix.command }}
+
+  docs:
+    name: Docs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+      - uses: dtolnay/install@cargo-docs-rs
+
+      # Per package, exactly as docs.rs will build it: this honours each crate's
+      # `[package.metadata.docs.rs]` and catches a crate that only builds under the feature
+      # set the workspace happens to select.
+      - name: Build each package as docs.rs would
+        run: |
+          set -euo pipefail
+          for package in $(cargo metadata --no-deps --format-version 1 \
+              | jq -r '.packages[].name'); do
+            echo "::group::$package"
+            cargo docs-rs -p "$package"
+            echo "::endgroup::"
+          done
+
+      # A second pass over the whole workspace, which is what catches broken intra-doc links.
+      - name: Check for rustdoc warnings
+        env:
+          RUSTDOCFLAGS: --cfg docsrs -D warnings
+        run: cargo doc --workspace --all-features --no-deps --locked
+
+  coverage:
+    name: Coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@cargo-llvm-cov
+      - name: Collect coverage
+        run: |
+          cargo llvm-cov --workspace --all-features --locked \
+            --lcov --output-path lcov.info \
+            --fail-under-lines 85
+      - name: Upload to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          files: lcov.info
+          fail_ci_if_error: true
+          token: ${{ secrets.CODECOV_TOKEN }}
+
+  miri:
+    name: Miri
+    runs-on: ubuntu-latest
+    env:
+      MIRIFLAGS: -Zmiri-strict-provenance
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: miri
+      - uses: Swatinem/rust-cache@v2
+      # Deliberately not `--all-features`: the third-party integration features pull in
+      # crates whose own unsafe code trips Miri (rkyv under Stacked Borrows, triomphe under
+      # Tree Borrows), which says nothing about this workspace. `portable/derive` is included
+      # so the unsafe the derive macros generate is covered.
+      - name: Run tests under Miri
+        run: cargo miri test --workspace --features portable/derive --lib

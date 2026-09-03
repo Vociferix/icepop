@@ -3,7 +3,6 @@
 //! The crate refers to itself as `portable` under `cfg(test)`, so every type here is written
 //! exactly as a dependent writes it, with no `crate` attribute unless the test is about one.
 
-use core::cmp::Ordering;
 use core::hash::Hasher;
 use std::collections::hash_map::DefaultHasher;
 
@@ -464,6 +463,8 @@ mod bounds {
 #[cfg(all(feature = "rkyv-0_8", feature = "alloc"))]
 mod rkyv {
     use super::*;
+
+    use core::cmp::Ordering;
 
     use rkyv_0_8::{Archive, Serialize};
 
