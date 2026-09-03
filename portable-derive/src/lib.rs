@@ -711,6 +711,13 @@ impl<'a> Shim<'a> {
 
     /// A `VisitPortableRepr` impl body visiting the shim built from `self`.
     fn visit_body(&self, crate_path: &Path) -> TokenStream {
+        // An empty enum has no values, so this body is unreachable. `match *self {}` is the
+        // only form that type-checks: a *reference* to an uninhabited type is inhabited, so
+        // matching `self` rather than `*self` is not exhaustive.
+        if matches!(self.data, Data::Enum(data) if data.variants.is_empty()) {
+            return quote! { match *self {} };
+        }
+
         let build = self.build();
         quote! {
             /// Reinterprets a borrow as a representation field.

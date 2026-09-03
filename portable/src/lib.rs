@@ -81,6 +81,11 @@ extern crate alloc;
 #[cfg(test)]
 extern crate std;
 
+// Lets the derive tests reach the crate by the same `::portable` path a dependent would, so
+// they exercise the macros exactly as a user writes them.
+#[cfg(test)]
+extern crate self as portable;
+
 pub mod eq;
 pub mod hash;
 pub mod hasher;
@@ -89,6 +94,9 @@ pub mod repr;
 
 #[cfg(feature = "default-hasher")]
 mod default_hasher;
+
+#[cfg(all(test, feature = "derive"))]
+mod derive_tests;
 
 #[doc(inline)]
 pub use self::{
