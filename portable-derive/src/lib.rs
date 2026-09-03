@@ -249,8 +249,7 @@ impl Attrs {
                     }
                     Ok(())
                 });
-            }
-            if attr.path().is_ident("portable") {
+            } else if attr.path().is_ident("portable") {
                 let span = attr.path().get_ident().unwrap().span();
                 for attr in attr.parse_args_with(Attr::parse_list)? {
                     match attr {
@@ -414,7 +413,9 @@ impl Attrs {
         }
 
         // The rkyv crate path is only used by the archived impls.
-        if rkyv.is_none() && let Some(path) = &rkyv_crate {
+        if rkyv.is_none()
+            && let Some(path) = &rkyv_crate
+        {
             return Err(syn::Error::new_spanned(
                 path,
                 "`rkyv_crate` has no effect without `rkyv`, which requests the archived impls",
@@ -448,9 +449,11 @@ impl Attrs {
         let ReprKind::Generate(explicit) = &self.repr else {
             return None;
         };
-        Some(explicit.clone().unwrap_or_else(|| {
-            Ident::new(&format!("{ty_name}Repr"), Span::call_site())
-        }))
+        Some(
+            explicit
+                .clone()
+                .unwrap_or_else(|| Ident::new(&format!("{ty_name}Repr"), Span::call_site())),
+        )
     }
 
     /// Returns the name of the archived counterpart, if archived impls were requested.
@@ -463,9 +466,7 @@ impl Attrs {
             explicit
                 .clone()
                 .or_else(|| self.rkyv_archived.clone())
-                .unwrap_or_else(|| {
-                    Ident::new(&format!("Archived{ty_name}"), Span::call_site())
-                }),
+                .unwrap_or_else(|| Ident::new(&format!("Archived{ty_name}"), Span::call_site())),
         )
     }
 
@@ -571,12 +572,7 @@ impl<'a> Shim<'a> {
     }
 
     /// The shim's type definition.
-    fn definition(
-        &self,
-        ty_name: &Ident,
-        vis: &syn::Visibility,
-        crate_path: &Path,
-    ) -> TokenStream {
+    fn definition(&self, ty_name: &Ident, vis: &syn::Visibility, crate_path: &Path) -> TokenStream {
         let name = &self.name;
         let decl = self.decl(&self.params);
         let field = |idx: usize| {
@@ -695,8 +691,11 @@ impl<'a> Shim<'a> {
                             }
                         }
                         Fields::Named(fields) => {
-                            let names: Vec<&Ident> =
-                                fields.named.iter().filter_map(|f| f.ident.as_ref()).collect();
+                            let names: Vec<&Ident> = fields
+                                .named
+                                .iter()
+                                .filter_map(|f| f.ident.as_ref())
+                                .collect();
                             quote! {
                                 Self::#vname { #(#names),* } =>
                                     #name::#vname { #(#names: #new(#names)),* },

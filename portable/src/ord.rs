@@ -5,6 +5,78 @@ use super::repr::{self, PortableRepr, VisitPortableRepr};
 
 use core::cmp::Ordering;
 
+/// Derives [`PortableReprOrd`](trait@PortableReprOrd), ordering a representation field by
+/// field.
+///
+/// Fields are compared in declaration order, and enum variants order by declaration order, so
+/// the ordering matches what [`Ord`] would derive. The impl lands on whatever the type's
+/// representation is: the type itself by default, or the generated representation under
+/// `#[portable(repr)]`, where a single impl covers every pair of types sharing it.
+///
+/// The type must also implement [`PortableReprEq`], the supertrait,
+/// and [`VisitPortableRepr`] — derive both alongside this. A
+/// type that delegates with `map` is not its own representation, so this derive does not apply
+/// to it; it gets [`PortableOrd`] from the representation it delegates to.
+///
+/// # Attributes
+///
+/// Attributes are written `#[portable(...)]` on the type. See
+/// [`VisitPortableRepr`](derive@crate::repr::VisitPortableRepr) for `repr`, `rkyv` and the
+/// other attributes shared by every `portable` derive, which decide where this impl lands.
+///
+/// - `repr_ord_bounds(...)` — where predicates for the generated impl, in place of the default
+///   bound of [`PortableOrd`] on each of the type's parameters. `bounds(...)` sets them for
+///   every `portable` derive at once, and the more specific attribute wins. Bounds declared on
+///   the type's own parameters are always kept.
+/// - `crate = path` — path to the `portable` crate. Defaults to `::portable`.
+///
+/// Both are rejected alongside a generated representation, whose impl is bounded by the field
+/// types rather than by the type's parameters.
+///
+/// # Example
+///
+/// ```
+/// use portable::PortableOrd;
+/// use portable::eq::PortableReprEq;
+/// use portable::ord::PortableReprOrd;
+/// use portable::repr::VisitPortableRepr;
+///
+/// #[derive(VisitPortableRepr, PortableReprEq, PortableReprOrd)]
+/// #[portable(repr)]
+/// struct Version {
+///     major: u32,
+///     minor: u32,
+/// }
+///
+/// let old = Version { major: 1, minor: 9 };
+/// let new = Version { major: 2, minor: 0 };
+///
+/// assert!(old.portable_cmp(&new).is_lt());
+/// ```
+///
+/// # Generated impl
+///
+/// `#[portable(repr)]` on the `Version` above generates approximately:
+///
+/// ```ignore
+/// impl<T0: PortableOrd<U0> + ?Sized, T1: PortableOrd<U1> + ?Sized, U0: ?Sized, U1: ?Sized>
+///     PortableReprOrd<VersionRepr<U0, U1>> for VersionRepr<T0, T1>
+/// {
+///     fn portable_repr_cmp(&self, other: &VersionRepr<U0, U1>) -> Ordering {
+///         let ord = self.major.portable_cmp(&*other.major);
+///         if ord.is_ne() {
+///             return ord;
+///         }
+///         let ord = self.minor.portable_cmp(&*other.minor);
+///         if ord.is_ne() {
+///             return ord;
+///         }
+///         Ordering::Equal
+///     }
+/// }
+/// ```
+///
+/// For an enum each variant additionally orders before every variant declared after it.
 #[cfg(feature = "derive")]
 pub use portable_derive::PortableReprOrd;
 

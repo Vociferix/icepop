@@ -3,6 +3,69 @@
 use core::hash::Hasher;
 use core::ops::RangeBounds;
 
+/// Derives [`PortableHash`](trait@PortableHash), hashing each field in turn.
+///
+/// Hashing does not go through representations: the impl is written against the type itself,
+/// and hashes every field in declaration order. An enum first hashes its variant's index, as
+/// the smallest unsigned integer that can hold every index, and then that variant's fields.
+///
+/// Because equal values must hash equally, a type whose fields hash portably will agree with
+/// any type it compares equal to — including its archived counterpart under `rkyv`.
+///
+/// # Attributes
+///
+/// Attributes are written `#[portable(...)]` on the type. Each accepts `name = value` and
+/// `name(value)` alike.
+///
+/// - `rkyv` — also implement the trait for the type's [rkyv](https://docs.rs/rkyv) archived
+///   counterpart, so a value and its archived form hash identically. The archived type is
+///   taken from `#[rkyv(archived = ...)]` when present and is `Archived{Type}` otherwise;
+///   `rkyv = Name` overrides both.
+/// - `rkyv_crate = path` — path to the `rkyv` crate. Defaults to `::rkyv`.
+/// - `hash_bounds(...)` — where predicates for the generated impl, in place of the default
+///   bound of [`PortableHash`] on each of the type's parameters. `bounds(...)` sets them for
+///   every `portable` derive at once, and the more specific attribute wins. Bounds declared on
+///   the type's own parameters are always kept.
+/// - `crate = path` — path to the `portable` crate. Defaults to `::portable`.
+///
+/// # Example
+///
+/// ```
+/// use portable::{AssertPortable, PortableBuildHasher, PortableHash};
+/// use std::hash::RandomState;
+///
+/// #[derive(PortableHash)]
+/// struct Point {
+///     x: u32,
+///     y: u64,
+/// }
+///
+/// let build_hasher = AssertPortable(RandomState::new());
+///
+/// assert_eq!(
+///     build_hasher.portable_hash_one(&Point { x: 1, y: 2 }),
+///     build_hasher.portable_hash_one(&Point { x: 1, y: 2 }),
+/// );
+/// ```
+///
+/// # Generated impl
+///
+/// The `Point` above generates approximately:
+///
+/// ```ignore
+/// impl PortableHash for Point {
+///     fn portable_hash<H>(&self, state: &mut H)
+///     where
+///         H: Hasher,
+///     {
+///         self.x.portable_hash(state);
+///         self.y.portable_hash(state);
+///     }
+/// }
+/// ```
+///
+/// With `rkyv`, the identical body is also emitted as `impl PortableHash for ArchivedPoint`,
+/// which is what makes a value and its archived form hash equally.
 #[cfg(feature = "derive")]
 pub use portable_derive::PortableHash;
 
@@ -187,6 +250,18 @@ where
         H: Hasher,
     {
         T::portable_hash(*self, state);
+    }
+}
+
+impl<T> PortableHash for crate::repr::Field<T>
+where
+    T: PortableHash + ?Sized,
+{
+    fn portable_hash<H>(&self, state: &mut H)
+    where
+        H: Hasher,
+    {
+        T::portable_hash(self, state);
     }
 }
 

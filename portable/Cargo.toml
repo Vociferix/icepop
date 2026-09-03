@@ -65,6 +65,7 @@ __all = [
   "getrandom",
   "rkyv-0_8",
   "serde",
+  "derive",
   "allocator-api2-0_4",
   "allocator-api2-0_3",
   "allocator-api2-0_2",

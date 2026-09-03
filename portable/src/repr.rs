@@ -12,6 +12,107 @@ use super::Portable;
 
 use core::ptr::NonNull;
 
+/// Derives [`VisitPortableRepr`](trait@VisitPortableRepr), naming a type's portable
+/// representation.
+///
+/// A type may represent itself, delegate to an existing representation, or have one generated
+/// from its fields. A generated representation is a view holding a borrowed [`Field`] per
+/// field, and every type visiting to it compares against every other — which is how a value
+/// and its archived counterpart interoperate without either naming the other.
+///
+/// Only generated code can build a representation, since [`Field`] has no public constructor,
+/// so a generated one is shared with the archived counterpart rather than with hand-written
+/// impls.
+///
+/// # Attributes
+///
+/// Attributes are written `#[portable(...)]` on the type and are read by every `portable`
+/// derive on it. Each accepts `name = value` and `name(value)` alike.
+///
+/// - `repr` — generate a representation named `{Type}Repr`.
+/// - `repr = Name` — generate one named `Name`.
+/// - `repr = Self` — the type is its own representation. This is the default.
+/// - `map = expr` — reach the representation by applying `expr` to `&self`. Pair it with
+///   `repr = Type` to name what the map returns; naming a type *without* a `map` asks for one
+///   to be generated under that name instead.
+/// - `rkyv` — also implement the trait for the type's [rkyv](https://docs.rs/rkyv) archived
+///   counterpart, so the two compare with each other. Implies a generated representation. The
+///   archived type is taken from `#[rkyv(archived = ...)]` when present and is
+///   `Archived{Type}` otherwise; `rkyv = Name` overrides both.
+/// - `rkyv_crate = path` — path to the `rkyv` crate. Defaults to `::rkyv`.
+/// - `crate = path` — path to the `portable` crate. Defaults to `::portable`.
+/// - `visit_repr_bounds(...)` — where predicates for the generated impl, which otherwise has
+///   none. `bounds(...)` sets them for every `portable` derive at once, and the more specific
+///   attribute wins. Bounds declared on the type's own parameters are always kept.
+///
+/// # Example
+///
+/// ```
+/// use portable::repr::VisitPortableRepr;
+///
+/// #[derive(VisitPortableRepr)]
+/// #[portable(repr)]
+/// struct Point {
+///     x: u32,
+///     y: u64,
+/// }
+///
+/// // The representation borrows each field, and dereferences to it.
+/// let sum = Point { x: 1, y: 2 }.visit_portable_repr(|repr| u64::from(*repr.x) + *repr.y);
+///
+/// assert_eq!(sum, 3);
+/// ```
+///
+/// Delegating to an existing representation instead, which gives the type every comparison
+/// that representation has:
+///
+/// ```
+/// use portable::PortableEq;
+/// use portable::repr::VisitPortableRepr;
+///
+/// #[derive(VisitPortableRepr)]
+/// #[portable(repr = u32, map = |id: &Id| id.0)]
+/// struct Id(u32);
+///
+/// assert!(Id(7).portable_eq(&7u32));
+/// ```
+///
+/// # Generated impl
+///
+/// `#[portable(repr, rkyv)]` on the `Point` above generates approximately:
+///
+/// ```ignore
+/// pub struct PointRepr<T0: ?Sized, T1: ?Sized> {
+///     pub x: Field<T0>,
+///     pub y: Field<T1>,
+/// }
+///
+/// impl<T0: ?Sized, T1: ?Sized> VisitPortableRepr for PointRepr<T0, T1> {
+///     type Repr = Self;
+///
+///     fn visit_portable_repr<F, R>(&self, f: F) -> R
+///     where
+///         F: FnOnce(&Self::Repr) -> R,
+///     {
+///         f(self)
+///     }
+/// }
+///
+/// impl VisitPortableRepr for Point {
+///     type Repr = PointRepr<u32, u64>;
+///
+///     fn visit_portable_repr<F, R>(&self, f: F) -> R
+///     where
+///         F: FnOnce(&Self::Repr) -> R,
+///     {
+///         f(&PointRepr { x: field(&self.x), y: field(&self.y) })
+///     }
+/// }
+///
+/// // ...and the same impl for `ArchivedPoint`, whose representation is
+/// // `PointRepr<Archived<u32>, Archived<u64>>`. Sharing one `PointRepr` is what makes the
+/// // two compare with each other, in both directions, without either naming the other.
+/// ```
 #[cfg(feature = "derive")]
 pub use portable_derive::VisitPortableRepr;
 
@@ -440,6 +541,9 @@ self_repr!(core::time::Duration);
 /// `Field<T>` is `#[repr(transparent)]` over [`NonNull<T>`], which is the representation the
 /// derive macro relies on to build one.
 ///
+/// Like a reference, a `Field` represents whatever it borrows, so it compares and hashes as
+/// the field itself.
+///
 /// # Example
 ///
 /// ```
@@ -469,6 +573,8 @@ impl<T: ?Sized> Clone for Field<T> {
 }
 
 impl<T: ?Sized> Copy for Field<T> {}
+
+map_repr!([T: VisitPortableRepr + ?Sized] |val: &Field<T>| -> &T { val });
 
 /// Portable representation of optional values, holding a borrowed view of the contained value.
 ///

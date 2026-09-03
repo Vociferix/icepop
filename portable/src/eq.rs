@@ -2,6 +2,72 @@
 
 use super::repr::{self, PortableRepr, VisitPortableRepr};
 
+/// Derives [`PortableReprEq`](trait@PortableReprEq), comparing a representation field by field.
+///
+/// The impl lands on whatever the type's representation is: the type itself by default, or the
+/// generated representation under `#[portable(repr)]`, where a single impl covers every pair of
+/// types sharing it. Enum variants compare equal only to themselves.
+///
+/// The type must implement [`VisitPortableRepr`] — derive it
+/// alongside this. A type that delegates with `map` is not its own representation, so this
+/// derive does not apply to it; it gets [`PortableEq`] from the representation it delegates to.
+///
+/// # Attributes
+///
+/// Attributes are written `#[portable(...)]` on the type. See
+/// [`VisitPortableRepr`](derive@crate::repr::VisitPortableRepr) for `repr`, `rkyv` and the
+/// other attributes shared by every `portable` derive, which decide where this impl lands.
+///
+/// - `repr_eq_bounds(...)` — where predicates for the generated impl, in place of the default
+///   bound of [`PortableEq`] on each of the type's parameters. `bounds(...)` sets them for
+///   every `portable` derive at once, and the more specific attribute wins. Bounds declared on
+///   the type's own parameters are always kept.
+/// - `crate = path` — path to the `portable` crate. Defaults to `::portable`.
+///
+/// Both are rejected alongside a generated representation, whose impl is bounded by the field
+/// types rather than by the type's parameters.
+///
+/// # Example
+///
+/// ```
+/// use portable::PortableEq;
+/// use portable::eq::PortableReprEq;
+/// use portable::repr::VisitPortableRepr;
+///
+/// #[derive(VisitPortableRepr, PortableReprEq)]
+/// #[portable(repr)]
+/// enum Shape {
+///     Dot,
+///     Line(u32),
+/// }
+///
+/// assert!(Shape::Line(1).portable_eq(&Shape::Line(1)));
+/// assert!(!Shape::Line(1).portable_eq(&Shape::Line(2)));
+/// assert!(!Shape::Line(1).portable_eq(&Shape::Dot));
+/// ```
+///
+/// # Generated impl
+///
+/// `#[portable(repr)]` on the `Shape` above generates approximately:
+///
+/// ```ignore
+/// impl<T0: PortableEq<U0> + ?Sized, U0: ?Sized> PortableReprEq<ShapeRepr<U0>>
+///     for ShapeRepr<T0>
+/// {
+///     fn portable_repr_eq(&self, other: &ShapeRepr<U0>) -> bool {
+///         match (self, other) {
+///             (ShapeRepr::Dot, ShapeRepr::Dot) => true,
+///             (ShapeRepr::Line(l0), ShapeRepr::Line(r0)) => {
+///                 true && l0.portable_eq(&**r0)
+///             }
+///             _ => false,
+///         }
+///     }
+/// }
+/// ```
+///
+/// Without a generated representation the impl is the same comparison written against the type
+/// itself, as `impl PortableReprEq for Shape`.
 #[cfg(feature = "derive")]
 pub use portable_derive::PortableReprEq;
 
