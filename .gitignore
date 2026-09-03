@@ -2,3 +2,6 @@
 /.claude
 /.serena
 *.bak
+
+# Coverage output
+/lcov.info

@@ -1,0 +1,22 @@
+# Codecov configuration. The hard floor is enforced by `cargo llvm-cov --fail-under-lines`
+# in CI; these statuses catch regressions relative to the base commit.
+coverage:
+  status:
+    project:
+      default:
+        target: auto
+        # Tolerate small fluctuations, fail on a real regression.
+        threshold: 1%
+    patch:
+      default:
+        # New and changed lines should be covered.
+        target: 80%
+        threshold: 0%
+
+comment:
+  layout: "reach, diff, flags, files"
+  require_changes: true
+
+ignore:
+  - "**/tests.rs"
+  - "portable/src/derive_tests.rs"

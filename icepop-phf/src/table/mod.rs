@@ -367,11 +367,14 @@ where
     {
         let indices = keys.map(|key| self.get_index(key));
         assert!(unique_indices(&indices), "duplicate key found");
+        // Taken once, before any entry is borrowed: reborrowing `self.entries` again would
+        // cover the whole array and invalidate the references already handed out.
+        let entries = self.entries.as_mut_ptr();
         indices.map(|idx| {
             idx.map(|idx| {
                 // SAFETY: `idx` came from `get_index`, so it is within the entry array, and the
                 // assert above rules out two keys sharing one, so no two borrows alias.
-                let (k, v) = unsafe { &mut *self.entries.as_mut_ptr().add(idx) };
+                let (k, v) = unsafe { &mut *entries.add(idx) };
                 (&*k, v)
             })
         })
@@ -390,9 +393,12 @@ where
     {
         let indices = keys.map(|key| self.get_index(key));
         assert!(unique_indices(&indices), "duplicate key found");
+        // Taken once, before any entry is borrowed: reborrowing `self.entries` again would
+        // cover the whole array and invalidate the references already handed out.
+        let entries = self.entries.as_mut_ptr();
         // SAFETY: each `idx` came from `get_index`, so it is within the entry array, and the assert
         // above rules out two keys sharing one, so no two borrows alias.
-        indices.map(|idx| idx.map(|idx| unsafe { &mut (*self.entries.as_mut_ptr().add(idx)).1 }))
+        indices.map(|idx| idx.map(|idx| unsafe { &mut (*entries.add(idx)).1 }))
     }
 
     /// # Safety
@@ -406,11 +412,16 @@ where
         Q: HashOps<S, P> + EqOps<K, P> + ?Sized,
         K: 'a,
     {
-        keys.map(|key| {
-            self.get_index(key).map(|idx| {
+        let indices = keys.map(|key| self.get_index(key));
+        // Taken once, after the last shared borrow and before any entry is borrowed: either a
+        // further `get_index` or a second `as_mut_ptr` would reborrow the whole array and
+        // invalidate the references already handed out.
+        let entries = self.entries.as_mut_ptr();
+        indices.map(|idx| {
+            idx.map(|idx| {
                 // SAFETY: `idx` came from `get_index`, so it is within the entry array, and the
                 // caller guarantees no two keys share an entry, so no two borrows alias.
-                let (k, v) = unsafe { &mut *self.entries.as_mut_ptr().add(idx) };
+                let (k, v) = unsafe { &mut *entries.add(idx) };
                 (&*k, v)
             })
         })
@@ -427,12 +438,14 @@ where
         Q: HashOps<S, P> + EqOps<K, P> + ?Sized,
         K: 'a,
     {
-        keys.map(|key| {
-            // SAFETY: `idx` came from `get_index`, so it is within the entry array, and the caller
-            // guarantees no two keys share an entry, so no two borrows alias.
-            self.get_index(key)
-                .map(|idx| unsafe { &mut (*self.entries.as_mut_ptr().add(idx)).1 })
-        })
+        let indices = keys.map(|key| self.get_index(key));
+        // Taken once, after the last shared borrow and before any entry is borrowed: either a
+        // further `get_index` or a second `as_mut_ptr` would reborrow the whole array and
+        // invalidate the references already handed out.
+        let entries = self.entries.as_mut_ptr();
+        // SAFETY: each `idx` came from `get_index`, so it is within the entry array, and the caller
+        // guarantees no two keys share an entry, so no two borrows alias.
+        indices.map(|idx| idx.map(|idx| unsafe { &mut (*entries.add(idx)).1 }))
     }
 }
 
